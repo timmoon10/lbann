@@ -68,6 +68,7 @@
 #include "lbann/layers/misc/argmax.hpp"
 #include "lbann/layers/misc/argmin.hpp"
 #include "lbann/layers/misc/one_hot.hpp"
+#include "lbann/layers/misc/dist_embedding.hpp"
 #include "lbann/layers/regularizers/batch_normalization.hpp"
 #include "lbann/layers/regularizers/dropout.hpp"
 #include "lbann/layers/regularizers/local_response_normalization.hpp"
@@ -217,6 +218,11 @@ private:
 
     // Activations
     LBANN_REGISTER_DEFAULT_BUILDER(Identity, identity);
+
+    // Miscellaneous layers
+    factory_.register_builder("DistEmbedding",
+                              build_dist_embedding_layer_from_pbuf<T,L,D>);
+
   }
 
   // Just to be clear/safe.

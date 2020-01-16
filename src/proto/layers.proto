@@ -188,6 +188,7 @@ message Layer {
     Argmax argmax = 605;
     Argmin argmin = 606;
     OneHot one_hot = 607;
+    DistEmbedding dist_embedding = 609;
 
   }
 
@@ -646,6 +647,17 @@ message Layer {
   message OneHot {
     // Size of one-hot vector
     int64 size = 1;
+  }
+
+  /** @brief Embedding layer with distributed weights.
+   *
+   *  @warning This is extremely experimental.
+   */
+  message DistEmbedding {
+    /// Size of dictionary of embeddings
+    int64 num_embeddings = 1;
+    /// Size of embedding vectors
+    int64 embedding_dim = 2;
   }
 
 }// message Layer
