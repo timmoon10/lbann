@@ -32,8 +32,7 @@ template <typename TensorDataType, data_layout Layout, El::Device Device>
 std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf(
   lbann_comm* comm,
   const lbann_data::Layer& proto_layer) {
-  LBANN_ERROR("distributed embedding layer is only supported with ",
-              "fp16 datatype, data-parallel layout, and GPU");
+  LBANN_ERROR("distributed embedding layer is not supported on CPU");
   return nullptr;
 }
 

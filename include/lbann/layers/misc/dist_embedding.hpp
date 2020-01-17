@@ -53,10 +53,11 @@ public:
   dist_embedding_layer(
     lbann_comm* comm,
     size_t num_embeddings,
-    size_t embedding_dim);
+    size_t embedding_dim,
+    DataType learning_rate);
 
-  dist_embedding_layer(const dist_embedding_layer& other);
-  dist_embedding_layer& operator=(const dist_embedding_layer& other);
+  dist_embedding_layer(const dist_embedding_layer& other) = default;
+  dist_embedding_layer& operator=(const dist_embedding_layer& other) = default;
   ~dist_embedding_layer() = default;
 
   dist_embedding_layer* copy() const override;
@@ -82,16 +83,20 @@ private:
   /** Size of embedding vectors. */
   size_t m_embedding_dim;
 
+  /** SGD learning rate. */
+  DataType m_learning_rate;
+
+  /** Local embedding vectors. */
+  El::Matrix<TensorDataType, El::Device::GPU> m_local_embeddings;
+
 };
 
 // Builder function
 LBANN_DEFINE_LAYER_BUILDER(dist_embedding);
 
 // Explicit template instantiation
-#ifdef LBANN_HAS_GPU_FP16
 extern template class dist_embedding_layer<
-  fp16, data_layout::DATA_PARALLEL, El::Device::GPU>;
-#endif // LBANN_HAS_GPU_FP16
+  float, data_layout::DATA_PARALLEL, El::Device::GPU>;
 
 } // namespace lbann
 
