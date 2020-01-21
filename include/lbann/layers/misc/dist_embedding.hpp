@@ -34,7 +34,7 @@
 
 // Perform sparse SGD in backprop of embedding layer
 // Note: Bypasses the optimizer class
-#define LBANN_DIST_EMBEDDING_SPARSE_SGD
+// #define LBANN_DIST_EMBEDDING_SPARSE_SGD
 
 namespace lbann {
 
@@ -198,6 +198,8 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
 
 extern template class dist_embedding_layer<
   float, data_layout::DATA_PARALLEL, El::Device::GPU>;
+extern template class dist_embedding_layer<
+  float, data_layout::DATA_PARALLEL, El::Device::CPU>;
 
 } // namespace lbann
 

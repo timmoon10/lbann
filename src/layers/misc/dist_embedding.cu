@@ -37,8 +37,8 @@ namespace lbann {
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
-  using LocalMat = El::Matrix<TensorDataType, El::Device::GPU>;
-  using CPUMat = El::Matrix<TensorDataType, El::Device::CPU>;
+  using LocalMat = El::Matrix<TensorDataType, Device>;
+  using CPULocalMat = El::Matrix<TensorDataType, El::Device::CPU>;
 
   // Local data
   const auto& local_embeddings = dynamic_cast<const LocalMat&>(this->get_data_type_weights(0).get_values().LockedMatrix());
@@ -48,7 +48,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   const size_t local_mini_batch_size = local_input.Width();
 
   // Copy input to CPU
-  const CPUMat local_input_cpu(local_input);
+  const CPULocalMat local_input_cpu(local_input);
 
   // Populate output matrix with values from embedding matrix
   LocalMat embeddings_v, output_v;
@@ -72,8 +72,8 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   using DistMat = El::DistMatrix<TensorDataType,El::STAR,El::STAR,El::ELEMENT,El::Device::GPU>;
-  using LocalMat = El::Matrix<TensorDataType, El::Device::GPU>;
-  using CPUMat = El::Matrix<TensorDataType, El::Device::CPU>;
+  using LocalMat = El::Matrix<TensorDataType, Device>;
+  using CPULocalMat = El::Matrix<TensorDataType, El::Device::CPU>;
 
   // Local data
   auto& embeddings = dynamic_cast<DistMat&>(this->get_data_type_weights(0).get_values());
@@ -86,7 +86,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   El::Zero(this->get_error_signals());
 
   // Copy input to CPU
-  const CPUMat local_input_cpu(local_input);
+  const CPULocalMat local_input_cpu(local_input);
 
   // Compute gradient w.r.t. embeddings
   DistMat embeddings_grad(embeddings.Grid());
@@ -128,8 +128,13 @@ template <typename TensorDataType, data_layout Layout, El::Device Device>
 std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf(
   lbann_comm* comm,
   const lbann_data::Layer& proto_layer) {
-  LBANN_ERROR("distributed embedding layer is only supported with ",
-              "float datatype, data-parallel layout, and GPU");
+  LBANN_ERROR(
+    "Attempted to construct dist_embedding_layer ",
+    "with invalid parameters ",
+    "(TensorDataType=",TypeName<TensorDataType>(),", ",
+    "Layout=",to_string(Layout),", ",
+    "Device=",to_string(Device),")");
+  return nullptr;
 }
 
 template <>
