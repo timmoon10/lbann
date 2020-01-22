@@ -70,42 +70,42 @@ def construct_model(lbann):
     # GPU
     # ------------------------------------------
 
-    # Embeddings
-    np.random.seed(_seed)
-    embedding_dim = 5
-    embeddings = np.random.normal(size=(_num_embeddings,embedding_dim))
+    # # Embeddings
+    # np.random.seed(_seed)
+    # embedding_dim = 5
+    # embeddings = np.random.normal(size=(_num_embeddings,embedding_dim))
 
-    # LBANN implementation
-    embedding_weights = lbann.Weights(
-        optimizer=lbann.SGD(),
-        initializer=lbann.ValueInitializer(values=tools.str_list(np.nditer(embeddings)))
-    )
-    x = x_lbann
-    y = lbann.DistEmbedding(x,
-                            weights=embedding_weights,
-                            num_embeddings=_num_embeddings,
-                            embedding_dim=embedding_dim,
-                            learning_rate=0.1,
-                            device='gpu')
-    z = lbann.L2Norm2(y)
-    obj.append(z)
-    metrics.append(lbann.Metric(z, name='GPU'))
+    # # LBANN implementation
+    # embedding_weights = lbann.Weights(
+    #     optimizer=lbann.SGD(),
+    #     initializer=lbann.ValueInitializer(values=tools.str_list(np.nditer(embeddings)))
+    # )
+    # x = x_lbann
+    # y = lbann.DistEmbedding(x,
+    #                         weights=embedding_weights,
+    #                         num_embeddings=_num_embeddings,
+    #                         embedding_dim=embedding_dim,
+    #                         learning_rate=0.1,
+    #                         device='gpu')
+    # z = lbann.L2Norm2(y)
+    # obj.append(z)
+    # metrics.append(lbann.Metric(z, name='GPU'))
 
-    # NumPy implementation
-    vals = []
-    for i in range(num_samples()):
-        x = get_sample(i)
-        y = embeddings[x,:]
-        z = tools.numpy_l2norm2(y)
-        vals.append(z)
-    val = np.mean(vals)
-    tol = 8 * val * np.finfo(np.float32).eps
-    callbacks.append(lbann.CallbackCheckMetric(
-        metric=metrics[-1].name,
-        lower_bound=val-tol,
-        upper_bound=val+tol,
-        error_on_failure=True,
-        execution_modes='test'))
+    # # NumPy implementation
+    # vals = []
+    # for i in range(num_samples()):
+    #     x = get_sample(i)
+    #     y = embeddings[x,:]
+    #     z = tools.numpy_l2norm2(y)
+    #     vals.append(z)
+    # val = np.mean(vals)
+    # tol = 8 * val * np.finfo(np.float32).eps
+    # callbacks.append(lbann.CallbackCheckMetric(
+    #     metric=metrics[-1].name,
+    #     lower_bound=val-tol,
+    #     upper_bound=val+tol,
+    #     error_on_failure=True,
+    #     execution_modes='test'))
 
     # ------------------------------------------
     # CPU

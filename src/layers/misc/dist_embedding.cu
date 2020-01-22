@@ -36,6 +36,54 @@ namespace lbann {
 // =============================================
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
+void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
+  data_type_layer<TensorDataType>::setup_data();
+
+  // Construct default weights if needed
+  // Note: Randomly drawn from normal distribution with mean 0 and
+  // standard deviation 1.
+  if (!this->has_weights()) {
+    auto w = make_unique<data_type_weights<TensorDataType>>(this->get_comm());
+    auto init = make_unique<normal_initializer<TensorDataType>>(0,1);
+    w->set_name(this->get_name() + "_weights");
+    w->set_initializer(std::move(init));
+    this->add_weights(w.get());
+    this->m_model->add_weights(std::move(w));
+  }
+  if (this->num_weights() != 1) {
+    LBANN_ERROR("attempted to setup ",
+                this->get_type()," layer \"",this->get_name(),"\" ",
+                "with an invalid number of weights ",
+                "(expected 1, found ",this->num_weights(),")");
+  }
+
+  // Configure embedding weights
+  auto& embeddings = this->get_data_type_weights(0);
+  auto matrix_dist = this->get_prev_activations().DistData();
+  matrix_dist.colDist = El::STAR;
+  matrix_dist.rowDist = El::STAR;
+  embeddings.set_dims({static_cast<int>(m_embedding_dim)},
+                      {static_cast<int>(m_num_embeddings)});
+  embeddings.set_matrix_distribution(matrix_dist);
+
+  // Set dummy optimizer
+  // Note: This layer manually performs sparse SGD during backprop.
+  // However, the weights must have an optimizer to prevent the model
+  // from optimizing out the layer during the backprop.
+  /// @todo Sparse optimizers
+  this->get_data_type_weights(0).set_optimizer(
+    make_unique<sgd<TensorDataType>>(0.));
+
+  // Setup embedding weights
+  embeddings.setup();
+
+}
+
+// =============================================
+// Forward prop
+// =============================================
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   using LocalMat = El::Matrix<TensorDataType, Device>;
   using CPULocalMat = El::Matrix<TensorDataType, El::Device::CPU>;
@@ -137,6 +185,8 @@ std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf(
   return nullptr;
 }
 
+/// @todo Restore
+#if 0
 template <>
 std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf<float,data_layout::DATA_PARALLEL,El::Device::GPU>(
   lbann_comm* comm,
@@ -148,14 +198,16 @@ std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf<float,data_layout::D
     params.embedding_dim(),
     params.learning_rate());
 }
+#endif // 0
 
 // =============================================
 // Explicit template instantiation
 // =============================================
 
+/// @todo Implement on GPU with nvshmem
 /// @todo fp16
-template class dist_embedding_layer<
-  float, data_layout::DATA_PARALLEL, El::Device::GPU>;
+// template class dist_embedding_layer<
+//   float, data_layout::DATA_PARALLEL, El::Device::GPU>;
 
 #define PROTO(T)                                                        \
   template std::unique_ptr<Layer>                                       \
