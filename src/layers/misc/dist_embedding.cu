@@ -32,8 +32,12 @@
 namespace lbann {
 
 // =============================================
-// Forward prop
+// Setup functions
 // =============================================
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+dist_embedding_layer<TensorDataType,Layout,Device>::~dist_embedding_layer()
+{}
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {

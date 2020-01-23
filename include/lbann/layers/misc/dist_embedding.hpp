@@ -33,7 +33,7 @@
 #include "lbann/utils/memory.hpp"
 
 // Perform sparse SGD in backprop of embedding layer
-// Note: Bypasses the optimizer class
+// Note: Bypasses the optimizer class.
 // #define LBANN_DIST_EMBEDDING_SPARSE_SGD
 
 namespace lbann {
@@ -59,9 +59,9 @@ public:
     size_t embedding_dim,
     DataType learning_rate);
 
-  dist_embedding_layer(const dist_embedding_layer& other) = default;
-  dist_embedding_layer& operator=(const dist_embedding_layer& other) = default;
-  ~dist_embedding_layer() = default;
+  dist_embedding_layer(const dist_embedding_layer& other);
+  dist_embedding_layer& operator=(const dist_embedding_layer& other);
+  ~dist_embedding_layer();
 
   dist_embedding_layer* copy() const override;
   std::string get_type() const override;
@@ -88,6 +88,9 @@ private:
   /** SGD learning rate. */
   DataType m_learning_rate;
 
+  void* m_embeddings_buffer{nullptr};
+  void* m_embeddings_grad_buffer{nullptr};
+
 };
 
 // Builder function
@@ -108,6 +111,19 @@ dist_embedding_layer<TensorDataType,Layout,Device>::dist_embedding_layer(
     m_embedding_dim{embedding_dim},
     m_learning_rate{learning_rate}
 {}
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+dist_embedding_layer<TensorDataType,Layout,Device>::dist_embedding_layer(
+  const dist_embedding_layer& other)
+  : data_type_layer<TensorDataType>(other) {
+  LBANN_ERROR("copy constructor is invalid for dist_embedding_layer");
+}
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+dist_embedding_layer<TensorDataType,Layout,Device>& dist_embedding_layer<TensorDataType,Layout,Device>::operator=(
+  const dist_embedding_layer& other) {
+  LBANN_ERROR("copy assignment operator is invalid for dist_embedding_layer");
+}
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 dist_embedding_layer<TensorDataType,Layout,Device>* dist_embedding_layer<TensorDataType,Layout,Device>::copy() const {

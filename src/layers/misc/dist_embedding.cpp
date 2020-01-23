@@ -29,15 +29,41 @@
 
 #include <layers.pb.h>
 
+#ifdef LBANN_HAS_SHMEM
+#include <shmem.h>
+#endif // LBANN_HAS_SHMEM
+
 namespace lbann {
 
 // =============================================
-// Forward prop
+// Setup functions
 // =============================================
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+dist_embedding_layer<TensorDataType,Layout,Device>::~dist_embedding_layer()
+{
+#ifdef LBANN_HAS_SHMEM
+  if (m_embeddings_buffer != nullptr) {
+    // shmem_free(m_embeddings_buffer);
+  }
+  if (m_embeddings_grad_buffer != nullptr) {
+    // shmem_free(m_embeddings_grad_buffer);
+  }
+#endif // LBANN_HAS_SHMEM
+}
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
   data_type_layer<TensorDataType>::setup_data();
+#ifndef LBANN_HAS_SHMEM
+  LBANN_ERROR(
+    "dist_embedding_layer with ",
+    "(TensorDataType=",TypeName<TensorDataType>(),", ",
+    "Layout=",to_string(Layout),", ",
+    "Device=",to_string(Device),") ",
+    "requires SHMEM, but LBANN has not been built with SHMEM");
+  return;
+#else // LBANN_HAS_SHMEM
 
   // Construct default weights if needed
   // Note: Randomly drawn from normal distribution with mean 0 and
@@ -77,6 +103,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
   // Setup embedding weights
   embeddings.setup();
 
+#endif // LBANN_HAS_SHMEM
 }
 
 // =============================================
@@ -85,6 +112,15 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
+#ifndef LBANN_HAS_SHMEM
+  LBANN_ERROR(
+    "dist_embedding_layer with ",
+    "(TensorDataType=",TypeName<TensorDataType>(),", ",
+    "Layout=",to_string(Layout),", ",
+    "Device=",to_string(Device),") ",
+    "requires SHMEM, but LBANN has not been built with SHMEM");
+  return;
+#else // LBANN_HAS_SHMEM
   using LocalMat = El::Matrix<TensorDataType, Device>;
 
   // Local data
@@ -107,6 +143,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
     }
   }
 
+#endif // LBANN_HAS_SHMEM
 }
 
 // =============================================
@@ -115,6 +152,15 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
+#ifndef LBANN_HAS_SHMEM
+  LBANN_ERROR(
+    "dist_embedding_layer with ",
+    "(TensorDataType=",TypeName<TensorDataType>(),", ",
+    "Layout=",to_string(Layout),", ",
+    "Device=",to_string(Device),") ",
+    "requires SHMEM, but LBANN has not been built with SHMEM");
+  return;
+#else // LBANN_HAS_SHMEM
   using DistMat_ = El::DistMatrix<TensorDataType,El::STAR,El::STAR,El::ELEMENT,Device>;
   using LocalMat = El::Matrix<TensorDataType, Device>;
 
@@ -158,6 +204,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
 
 #endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
 
+#endif // LBANN_HAS_SHMEM
 }
 
 // =============================================

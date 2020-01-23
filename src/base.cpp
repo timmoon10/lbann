@@ -35,6 +35,9 @@
 #define HWLOC_OBJ_NUMANODE HWLOC_OBJ_NODE
 #endif
 #endif
+#ifdef LBANN_HAS_SHMEM
+#include <shmem.h>
+#endif // LBANN_HAS_SHMEM
 
 #include "lbann/comm.hpp"
 #include "lbann/utils/exception.hpp"
@@ -91,6 +94,11 @@ world_comm_ptr initialize(int& argc, char**& argv, int seed) {
   init_random(seed);
   init_data_seq_random(seed);
 
+#ifdef LBANN_HAS_SHMEM
+  // Initialize SHMEM
+  shmem_init();
+#endif // LBANN_HAS_SHMEM
+
   return comm;
 }
 
@@ -101,6 +109,9 @@ void finalize(lbann_comm* comm) {
 #ifdef LBANN_HAS_PYTHON
   python::finalize();
 #endif
+#ifdef LBANN_HAS_SHMEM
+  shmem_finalize();
+#endif // LBANN_HAS_SHMEM
   if (comm != nullptr) {
     delete comm;
   }

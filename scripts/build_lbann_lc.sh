@@ -439,7 +439,7 @@ else
 fi
 
 # Add flag for libldl: may be needed some compilers
-CXX_FLAGS="${CXX_FLAGS} -ldl"
+CXX_FLAGS="${CXX_FLAGS} -ldl -L/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release/lib -loshmem"
 C_FLAGS="${CXX_FLAGS}"
 
 
@@ -546,8 +546,8 @@ fi
 # Get MPI compilers
 export MPI_HOME
 export CMAKE_PREFIX_PATH=${MPI_HOME}:${CMAKE_PREFIX_PATH}
-export MPI_C_COMPILER=${MPI_HOME}/bin/mpicc
-export MPI_CXX_COMPILER=${MPI_HOME}/bin/mpicxx
+export MPI_C_COMPILER=${MPI_HOME}/bin/oshCC
+export MPI_CXX_COMPILER=${MPI_HOME}/bin/oshc++
 export MPI_Fortran_COMPILER=${MPI_HOME}/bin/mpifort
 if [ "${MPI}" == "spectrum-mpi" ]; then
     WITH_SPECTRUM=ON
@@ -798,10 +798,10 @@ cmake \
 -D LBANN_CONDUIT_DIR=${CONDUIT_DIR} \
 -D LBANN_BUILT_WITH_SPECTRUM=${WITH_SPECTRUM} \
 -D OPENBLAS_ARCH_COMMAND=${OPENBLAS_ARCH} \
+-D LBANN_HAS_SHMEM=1 \
 ${SUPERBUILD_DIR}
 EOF
 )
-
 
 if [ ${VERBOSE} -ne 0 ]; then
     echo "${CONFIGURE_COMMAND}" |& tee cmake_superbuild_invocation.txt
