@@ -88,8 +88,19 @@ private:
   /** SGD learning rate. */
   DataType m_learning_rate;
 
+  std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> m_embeddings_grad;
+  std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> m_workspace;
+
   void* m_embeddings_buffer{nullptr};
   void* m_embeddings_grad_buffer{nullptr};
+
+  void* m_workspace_buffer{nullptr};
+  size_t m_workspace_size{0};
+
+  long* m_workspace_pSync_ptr{nullptr};
+  size_t m_workspace_pSync_size{0};
+  TensorDataType* m_workspace_pWrk_ptr{nullptr};
+  size_t m_workspace_pWrk_size{0};
 
 };
 
