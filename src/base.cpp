@@ -96,7 +96,13 @@ world_comm_ptr initialize(int& argc, char**& argv, int seed) {
 
 #ifdef LBANN_HAS_SHMEM
   // Initialize SHMEM
-  shmem_init();
+  {
+    int threading_level = SHMEM_THREAD_MULTIPLE;
+    int status = shmem_init_thread(threading_level, &threading_level);
+    if (status != 0 || threading_level != SHMEM_THREAD_MULTIPLE) {
+      LBANN_ERROR("error initializing OpenSHMEM");
+    }
+  }
 #endif // LBANN_HAS_SHMEM
 
   return comm;

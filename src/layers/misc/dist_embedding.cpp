@@ -230,7 +230,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   shmem_barrier_all();
 
   // Get embedding vectors from remote processes
-  // LBANN_OMP_PARALLEL_FOR_COLLAPSE2
+  LBANN_OMP_PARALLEL_FOR_COLLAPSE2
   for (size_t j=0; j<local_mini_batch_size; ++j) {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_index = static_cast<size_t>(std::floor(local_input(i,j)));
@@ -310,7 +310,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
     m_embeddings_grad_buffer, output_size, dist.root);
 
   // Send gradients w.r.t. embedding vectors to remote processes
-  // LBANN_OMP_PARALLEL_FOR_COLLAPSE2
+  LBANN_OMP_PARALLEL_FOR_COLLAPSE2
   for (size_t j=0; j<local_mini_batch_size; ++j) {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_j = input.GlobalCol(j);
