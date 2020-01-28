@@ -119,8 +119,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
   if (!this->has_weights()) {
     auto w = make_unique<data_type_weights<TensorDataType>>(this->get_comm());
     auto init = make_unique<normal_initializer<TensorDataType>>(0,1);
+    auto opt = this->m_model->template create_optimizer<TensorDataType>();
     w->set_name(this->get_name() + "_weights");
     w->set_initializer(std::move(init));
+    w->set_optimizer(std::move(opt));
     this->add_weights(w.get());
     this->m_model->add_weights(std::move(w));
   }
@@ -143,6 +145,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
     embeddings.set_matrix_distribution(dist);
   }
 
+#ifdef LBANN_DIST_EMBEDDING_SPARSE_SGD
   // Set dummy optimizer
   // Note: This layer manually performs sparse SGD during backprop.
   // However, the weights must have an optimizer to prevent the model
@@ -150,6 +153,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
   /// @todo Sparse optimizers
   this->get_data_type_weights(0).set_optimizer(
     make_unique<sgd<TensorDataType>>(0.));
+#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
 
   // Setup embedding weights
   embeddings.setup();
@@ -282,7 +286,9 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
 
   // Local data
   auto& embeddings = this->get_data_type_weights(0).get_values();
+  auto& local_embeddings = dynamic_cast<LocalMat&>(embeddings.Matrix());
   auto& embeddings_grad = dynamic_cast<El::ElementalMatrix<TensorDataType>&>(*m_embeddings_grad);
+  auto& local_embeddings_grad = dynamic_cast<LocalMat&>(embeddings_grad.Matrix());
   const auto& input = this->get_prev_activations();
   const auto& local_input = dynamic_cast<const LocalMat&>(input.LockedMatrix());
   const auto& local_output_grad = dynamic_cast<const LocalMat&>(this->get_local_prev_error_signals());
@@ -326,9 +332,28 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
 
 #ifdef LBANN_DIST_EMBEDDING_SPARSE_SGD
 
-  // Stochastic gradient descent
-  /// @todo Implement
-  // El::Axpy(-m_learning_rate, embeddings_grad, embeddings);
+  // Send gradient to optimizer
+  LocalMat embeddings_grad_v, embeddings_v;
+  for (size_t global_j=0; global_j<mini_batch_size; ++global_j) {
+    for (size_t i=0; i<input_size; ++i) {
+      const auto& req = m_requests_buffer[i + global_j*input_size];
+      if (req.is_active && req.source_rank == rank) {
+        El::LockedView(
+          embeddings_grad_v,
+          local_embeddings_grad,
+          El::IR(i*m_embedding_dim, (i+1)*m_embedding_dim),
+          El::IR(global_j));
+        El::View(
+          embeddings_v,
+          local_embeddings,
+          El::ALL, El::IR(req.source_index));
+        El::Axpy(
+          -m_learning_rate,
+          embeddings_grad_v,
+          embeddings_v);
+      }
+    }
+  }
 
 #else // LBANN_DIST_EMBEDDING_SPARSE_SGD
 

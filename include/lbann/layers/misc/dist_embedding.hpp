@@ -34,7 +34,7 @@
 
 // Perform sparse SGD in backprop of embedding layer
 // Note: Bypasses the optimizer class.
-// #define LBANN_DIST_EMBEDDING_SPARSE_SGD
+#define LBANN_DIST_EMBEDDING_SPARSE_SGD
 
 namespace lbann {
 

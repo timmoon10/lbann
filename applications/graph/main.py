@@ -37,6 +37,11 @@ parser.add_argument(
     help='directory for experiment artifacts', metavar='DIR')
 args = parser.parse_args()
 
+# Default learning rate
+# Note: Learning rate in original word2vec is 0.025
+if args.learning_rate < 0:
+    args.learning_rate = 0.025 * args.mini_batch_size
+
 # ----------------------------------
 # Embedding weights
 # ----------------------------------
@@ -69,17 +74,21 @@ input_slice = lbann.Slice(
     input_,
     slice_points=f'0 {num_negative_samples+1} {input_size}'
 )
-decoder_embeddings = lbann.Embedding(
+decoder_embeddings = lbann.DistEmbedding(
     input_slice,
     weights=decoder_embeddings_weights,
     num_embeddings=num_graph_nodes,
     embedding_dim=args.latent_dim,
+    learning_rate=args.learning_rate,
+    device='cpu',
 )
-encoder_embeddings = lbann.Embedding(
+encoder_embeddings = lbann.DistEmbedding(
     input_slice,
     weights=encoder_embeddings_weights,
     num_embeddings=num_graph_nodes,
     embedding_dim=args.latent_dim,
+    learning_rate=args.learning_rate,
+    device='cpu',
 )
 
 # Skip-Gram with negative sampling
@@ -99,6 +108,11 @@ obj = [
     lbann.LayerTerm(obj_positive, scale=-1),
     lbann.LayerTerm(obj_negative, scale=-1/num_negative_samples),
 ]
+
+# Perform all computation on CPU
+# TODO: GPU implementation
+for l in lbann.traverse_layer_graph(input_):
+    l.device = 'cpu'
 
 # ----------------------------------
 # Create data reader
@@ -120,11 +134,7 @@ _reader.python.sample_dims_function = 'sample_dims'
 # ----------------------------------
 
 # Create optimizer
-# Note: Learning rate in original word2vec is 0.025
-learning_rate = args.learning_rate
-if learning_rate < 0:
-    learning_rate = 0.025 * args.mini_batch_size
-opt = lbann.SGD(learn_rate=learning_rate)
+opt = lbann.SGD(learn_rate=args.learning_rate)
 
 # Create LBANN objects
 trainer = lbann.Trainer()
@@ -133,6 +143,7 @@ callbacks = [
     lbann.CallbackTimer(),
     lbann.CallbackDumpWeights(basename='embeddings',
                               epoch_interval=args.num_epochs),
+    lbann.CallbackPrintModelDescription(),
 ]
 model = lbann.Model(args.mini_batch_size,
                     args.num_epochs,
