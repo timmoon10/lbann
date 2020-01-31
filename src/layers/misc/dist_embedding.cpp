@@ -370,7 +370,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
       if (req.is_active && req.source_rank == rank) {
         El::LockedView(
           embeddings_grad_sparse_v,
-          embeddings_grad.LockedMatrix(),
+          local_embeddings_grad,
           El::IR(i*m_embedding_dim, (i+1)*m_embedding_dim),
           El::IR(global_j));
         El::View(
@@ -385,6 +385,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
     }
   }
   opt.add_to_gradient(*embeddings_grad_full);
+  (void) local_embeddings;
 
 #endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
 
