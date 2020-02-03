@@ -442,9 +442,14 @@ fi
 CXX_FLAGS="${CXX_FLAGS} -ldl"
 C_FLAGS="${CXX_FLAGS}"
 
+# Debug flag
+CXX_FLAGS="${CXX_FLAGS} -g"
+C_FLAGS="${CXX_FLAGS}"
+
 # Hacks to build with OpenSHMEM
-CXX_FLAGS="${CXX_FLAGS} -L/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release/lib -loshmem" # Lassen
-# CXX_FLAGS="${CXX_FLAGS} -I/g/g17/moon13/src/SOS/install/include -L/g/g17/moon13/src/SOS/install/lib -lsma -Wl,-rpath -Wl,/g/g17/moon13/src/SOS/install/lib" # Pascal
+# CXX_FLAGS="${CXX_FLAGS} -L/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release/lib -loshmem" # Lassen
+SOS_DIR=/g/g17/moon13/src/SOS/install/${CLUSTER}.llnl.gov
+CXX_FLAGS="${CXX_FLAGS} -I${SOS_DIR}/include -L${SOS_DIR}/lib -lsma -Wl,-rpath -Wl,${SOS_DIR}/lib" # Pascal
 C_FLAGS="${CXX_FLAGS}"
 
 # Set environment variables

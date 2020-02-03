@@ -43,15 +43,9 @@ template <typename TensorDataType, data_layout Layout, El::Device Device>
 dist_embedding_layer<TensorDataType,Layout,Device>::~dist_embedding_layer()
 {
 #ifdef LBANN_HAS_SHMEM
-  if (m_embeddings_buffer != nullptr) {
-    shmem_free(m_embeddings_buffer);
-  }
-  if (m_embeddings_grad_buffer != nullptr) {
-    shmem_free(m_embeddings_grad_buffer);
-  }
-  if (m_requests_buffer != nullptr) {
-    shmem_free(m_requests_buffer);
-  }
+  shmem_free(m_embeddings_buffer);
+  shmem_free(m_embeddings_grad_buffer);
+  shmem_free(m_requests_buffer);
 #endif // LBANN_HAS_SHMEM
 }
 
@@ -74,9 +68,10 @@ T* attach_dist_matrix_to_shmem_buffer(
   const size_t row_comm_size = El::mpi::Size(mat.RowComm());
   const size_t local_height = (height + col_comm_size - 1) / col_comm_size;
   const size_t local_width = (width + row_comm_size - 1) / row_comm_size;
+  const size_t local_size = local_height * local_width;
   auto* buffer = reinterpret_cast<T*>(
-    shmem_malloc(local_height * local_width * sizeof(T)));
-  if (buffer == nullptr) {
+    shmem_malloc(local_size * sizeof(T)));
+  if (local_size > 0 && buffer == nullptr) {
     LBANN_ERROR("failed to allocate OpenSHMEM buffer");
   }
 
@@ -159,15 +154,9 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
   embeddings.setup();
 
   // Reset SHMEM buffers
-  if (m_embeddings_buffer != nullptr) {
-    shmem_free(m_embeddings_buffer);
-  }
-  if (m_embeddings_grad_buffer != nullptr) {
-    shmem_free(m_embeddings_grad_buffer);
-  }
-  if (m_requests_buffer != nullptr) {
-    shmem_free(m_requests_buffer);
-  }
+  shmem_free(m_embeddings_buffer);
+  shmem_free(m_embeddings_grad_buffer);
+  shmem_free(m_requests_buffer);
 
   // Attach embeddings to SHMEM buffer
   auto& embeddings_mat = embeddings.get_values();
@@ -227,6 +216,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
         )
       );
   }
+  shmem_barrier_all();
   std::fill(
     m_requests_buffer,
     m_requests_buffer+m_requests_buffer_size,
@@ -282,9 +272,9 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
     "requires SHMEM, but LBANN has not been built with SHMEM");
   return;
 #else // LBANN_HAS_SHMEM
-  using LocalMat = El::Matrix<TensorDataType, Device>;
 
-  // Local data
+  // Data matrices
+  using LocalMat = El::Matrix<TensorDataType, Device>;
   auto& embeddings = this->get_data_type_weights(0).get_values();
   auto& local_embeddings = dynamic_cast<LocalMat&>(embeddings.Matrix());
   auto& embeddings_grad = dynamic_cast<El::ElementalMatrix<TensorDataType>&>(*m_embeddings_grad);
@@ -292,6 +282,8 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   const auto& input = this->get_prev_activations();
   const auto& local_input = dynamic_cast<const LocalMat&>(input.LockedMatrix());
   const auto& local_output_grad = dynamic_cast<const LocalMat&>(this->get_local_prev_error_signals());
+
+  // Dimensions
   const size_t input_size = this->get_input_size();
   const size_t output_size = this->get_output_size();
   const size_t mini_batch_size = input.Width();
@@ -330,63 +322,55 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   }
   shmem_barrier_all();
 
+  // Get local embeddings for sparse SGD
+  // Note: If we are not doing sparse SGD, then we initialize
+  // embeddings_v as a tensor of zeros. Applying sparse SGD to this
+  // tensor results in the full gradient tensor, which can then be
+  // sent to a dense optimizer.
+  LocalMat embeddings_v;
 #ifdef LBANN_DIST_EMBEDDING_SPARSE_SGD
-
-  // Send gradient to optimizer
-  LocalMat embeddings_grad_v, embeddings_v;
-  for (size_t global_j=0; global_j<mini_batch_size; ++global_j) {
-    for (size_t i=0; i<input_size; ++i) {
-      const auto& req = m_requests_buffer[i + global_j*input_size];
-      if (req.is_active && req.source_rank == rank) {
-        El::LockedView(
-          embeddings_grad_v,
-          local_embeddings_grad,
-          El::IR(i*m_embedding_dim, (i+1)*m_embedding_dim),
-          El::IR(global_j));
-        El::View(
-          embeddings_v,
-          local_embeddings,
-          El::ALL, El::IR(req.source_index));
-        El::Axpy(
-          -m_learning_rate,
-          embeddings_grad_v,
-          embeddings_v);
-      }
-    }
-  }
-
+  El::View(embeddings_v, local_embeddings);
 #else // LBANN_DIST_EMBEDDING_SPARSE_SGD
-
-  // Send gradient to optimizer
   auto& opt = *this->get_data_type_weights(0).get_optimizer();
   std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> embeddings_grad_full(
     embeddings.Construct(embeddings.Grid(), embeddings.Root()));
   embeddings_grad_full->AlignWith(embeddings);
   El::Zeros(*embeddings_grad_full, embeddings.Height(), embeddings.Width());
-  LocalMat embeddings_grad_full_v, embeddings_grad_sparse_v;
-  for (size_t global_j=0; global_j<mini_batch_size; ++global_j) {
-    for (size_t i=0; i<input_size; ++i) {
-      const auto& req = m_requests_buffer[i + global_j*input_size];
-      if (req.is_active && req.source_rank == rank) {
-        El::LockedView(
-          embeddings_grad_sparse_v,
-          local_embeddings_grad,
-          El::IR(i*m_embedding_dim, (i+1)*m_embedding_dim),
-          El::IR(global_j));
-        El::View(
-          embeddings_grad_full_v,
-          embeddings_grad_full->Matrix(),
-          El::ALL, El::IR(req.source_index));
-        El::Axpy(
-          TensorDataType{1.},
-          embeddings_grad_sparse_v,
-          embeddings_grad_full_v);
+  El::View(embeddings_v, embeddings_grad_full->Matrix());
+#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
+
+  // Sparse SGD on local embeddings
+  const size_t num_omp_threads = omp_get_num_threads();
+  const size_t embeddings_per_thread
+    = (local_embeddings.Width() + num_omp_threads - 1) / num_omp_threads;
+  LBANN_OMP_PARALLEL_FOR
+  for (size_t thread = 0; thread < num_omp_threads; ++thread) {
+    const size_t index_start = thread * embeddings_per_thread;
+    const size_t index_end = (thread+1) * embeddings_per_thread;
+    for (size_t global_j=0; global_j<mini_batch_size; ++global_j) {
+      for (size_t i=0; i<input_size; ++i) {
+        const auto& req = m_requests_buffer[i + global_j*input_size];
+        if (req.is_active
+            && req.source_rank == rank
+            && index_start <= req.source_index
+            && req.source_index < index_end) {
+          const auto* dw
+            = local_embeddings_grad.LockedBuffer(i*m_embedding_dim, global_j);
+          auto* w = embeddings_v.Buffer(0, req.source_index);
+          EL_SIMD
+          for (size_t k = 0; k < m_embedding_dim; ++k) {
+            w[k] += m_learning_rate * dw[k];
+          }
+        }
       }
     }
   }
-  opt.add_to_gradient(*embeddings_grad_full);
-  (void) local_embeddings;
 
+#ifndef LBANN_DIST_EMBEDDING_SPARSE_SGD
+  // Send gradient to dense optimizer
+  opt.add_to_gradient(
+    *embeddings_grad_full,
+    TensorDataType{1.} / m_learning_rate);
 #endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
 
 #endif // LBANN_HAS_SHMEM
