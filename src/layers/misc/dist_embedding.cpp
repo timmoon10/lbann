@@ -267,17 +267,18 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   // embeddings_v as a tensor of zeros. Applying sparse SGD to this
   // tensor results in the full gradient tensor, which can then be
   // sent to a dense optimizer.
-  LocalMat embeddings_v;
-#ifdef LBANN_DIST_EMBEDDING_SPARSE_SGD
-  El::View(embeddings_v, local_embeddings);
-#else // LBANN_DIST_EMBEDDING_SPARSE_SGD
-  auto& opt = *this->get_data_type_weights(0).get_optimizer();
-  std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> embeddings_grad(
-    embeddings.Construct(embeddings.Grid(), embeddings.Root()));
-  embeddings_grad->AlignWith(embeddings);
-  El::Zeros(*embeddings_grad, embeddings.Height(), embeddings.Width());
-  El::View(embeddings_v, embeddings_grad->Matrix());
-#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
+  LocalMat local_embeddings_v;
+  std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> embeddings_grad;
+  if (m_sparse_sgd) {
+    El::View(local_embeddings_v, local_embeddings);
+  }
+  else {
+    embeddings_grad.reset(
+      embeddings.Construct(embeddings.Grid(), embeddings.Root()));
+    embeddings_grad->AlignWith(embeddings);
+    El::Zeros(*embeddings_grad, embeddings.Height(), embeddings.Width());
+    El::View(local_embeddings_v, embeddings_grad->Matrix());
+  }
 
   // Sparse SGD on local embeddings
   const size_t num_omp_threads = omp_get_num_threads();
@@ -300,20 +301,21 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
 
         // Update embedding with gradient
         const auto* dw = workspace.LockedBuffer(0, req.target_index);
-        auto* w = embeddings_v.Buffer(0, req.source_index);
+        auto* w = local_embeddings_v.Buffer(0, req.source_index);
         EL_SIMD
         for (size_t k = 0; k < m_embedding_dim; ++k) {
-          w[k] += m_learning_rate * dw[k];
+          w[k] -= m_learning_rate * dw[k];
         }
 
       }
     }
   }
 
-#ifndef LBANN_DIST_EMBEDDING_SPARSE_SGD
-  // Send gradients to dense optimizer
-  opt.add_to_gradient(*embeddings_grad);
-#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
+  // Send gradients to dense optimizer if needed
+  auto&& opt = this->get_data_type_weights(0).get_optimizer();
+  if (!m_sparse_sgd && opt != nullptr) {
+    opt->add_to_gradient(*embeddings_grad);
+  }
 
 #endif // LBANN_HAS_SHMEM
 }
@@ -344,6 +346,7 @@ std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf<float,data_layout::D
     comm,
     params.num_embeddings(),
     params.embedding_dim(),
+    params.sparse_sgd(),
     params.learning_rate());
 }
 

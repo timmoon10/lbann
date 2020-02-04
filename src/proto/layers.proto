@@ -659,8 +659,13 @@ message Layer {
     int64 num_embeddings = 1;
     /** Size of embedding vectors. */
     int64 embedding_dim = 2;
+    /** Perform sparse SGD during backprop.
+     *
+     *  Bypasses optimizer class.
+     */
+    bool sparse_sgd = 3;
     /** SGD learning rate. */
-    double learning_rate = 3;
+    double learning_rate = 4;
   }
 
 }// message Layer

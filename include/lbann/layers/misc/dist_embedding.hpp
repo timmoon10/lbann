@@ -32,10 +32,6 @@
 #include "lbann/optimizers/sgd.hpp"
 #include "lbann/utils/memory.hpp"
 
-// Perform sparse SGD in backprop of embedding layer
-// Note: Bypasses the optimizer class.
-#define LBANN_DIST_EMBEDDING_SPARSE_SGD
-
 namespace lbann {
 
 /** @brief Embedding layer with distributed weights.
@@ -57,6 +53,7 @@ public:
     lbann_comm* comm,
     size_t num_embeddings,
     size_t embedding_dim,
+    bool sparse_sgd,
     DataType learning_rate);
 
   dist_embedding_layer(const dist_embedding_layer& other);
@@ -95,6 +92,11 @@ private:
   /** Size of embedding vectors. */
   size_t m_embedding_dim;
 
+  /** Perform sparse SGD during backprop.
+   *
+   *  Bypasses optimizer class.
+   */
+  bool m_sparse_sgd;
   /** SGD learning rate. */
   DataType m_learning_rate;
 
@@ -122,15 +124,19 @@ dist_embedding_layer<TensorDataType,Layout,Device>::dist_embedding_layer(
   lbann_comm* comm,
   size_t num_embeddings,
   size_t embedding_dim,
+  bool sparse_sgd,
   DataType learning_rate)
   : data_type_layer<TensorDataType>(comm),
     m_num_embeddings{num_embeddings},
     m_embedding_dim{embedding_dim},
+    m_sparse_sgd{sparse_sgd},
     m_learning_rate{learning_rate} {
-#ifndef LBANN_DIST_EMBEDDING_SPARSE_SGD
+
   // Learning rate is only used for sparse SGD
-  m_learning_rate = 1.0;
-#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
+  if (!m_sparse_sgd) {
+    m_learning_rate = -1.0;
+  }
+
 }
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
@@ -171,6 +177,8 @@ description dist_embedding_layer<TensorDataType,Layout,Device>::get_description(
   auto desc = data_type_layer<TensorDataType>::get_description();
   desc.add("Num embeddings", m_num_embeddings);
   desc.add("Embedding dim", m_embedding_dim);
+  desc.add("Using sparse SGD", m_sparse_sgd);
+  desc.add("SGD learning rate", m_learning_rate);
   return desc;
 }
 
@@ -218,15 +226,25 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
     embeddings.set_matrix_distribution(dist);
   }
 
-#ifdef LBANN_DIST_EMBEDDING_SPARSE_SGD
-  // Set dummy optimizer
-  // Note: This layer manually performs sparse SGD during backprop.
-  // However, the weights must have an optimizer to prevent the model
-  // from optimizing out the layer during the backprop.
-  /// @todo Sparse optimizers
-  this->get_data_type_weights(0).set_optimizer(
-    make_unique<sgd<TensorDataType>>(0.));
-#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
+  // Destroy embedding optimizer and create dummy weights
+  // Note: This layer manually performs sparse SGD on embedding
+  // weights during backprop, so the embedding optimizer isn't needed.
+  // However, the layer must send gradients to some optimizer to
+  // prevent the model from optimizing the layer out of compute graph
+  // during backprop. We get around this by creating dummy weights
+  // with no entries.
+  if (m_sparse_sgd) {
+    embeddings.set_optimizer(nullptr);
+    auto w = make_unique<data_type_weights<TensorDataType>>(this->get_comm());
+    auto opt = make_unique<sgd<TensorDataType>>(0.);
+    w->set_name(this->get_name() + "_dummy_weights");
+    w->set_optimizer(std::move(opt));
+    w->set_dims(1);
+    w->set_matrix_distribution(embeddings.get_matrix_distribution());
+    w->setup();
+    this->add_weights(w.get());
+    this->m_model->add_weights(std::move(w));
+  }
 
   // Setup embedding weights
   embeddings.setup();
