@@ -85,7 +85,6 @@ def construct_model(lbann):
     #                         weights=embedding_weights,
     #                         num_embeddings=_num_embeddings,
     #                         embedding_dim=embedding_dim,
-    #                         learning_rate=0.1,
     #                         device='gpu')
     # z = lbann.L2Norm2(y)
     # obj.append(z)
@@ -126,7 +125,6 @@ def construct_model(lbann):
                             weights=embedding_weights,
                             num_embeddings=_num_embeddings,
                             embedding_dim=embedding_dim,
-                            learning_rate=0.1,
                             device='cpu')
     z = lbann.L2Norm2(y)
     obj.append(z)

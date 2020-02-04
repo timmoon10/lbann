@@ -42,7 +42,7 @@ namespace lbann {
  *
  *  @warning This is extremely experimental.
  *
- *  @todo Distributed weights
+ *  @todo GPU implementation
  *  @todo Arbitrary unbalanced distributions
  *  @todo Sparse SGD with optimizer class
  */
@@ -80,14 +80,15 @@ protected:
 
 private:
 
+  /** Request for a shmem_put from a remote process. */
   struct shmem_put_request {
     size_t source_rank{0};
     size_t source_index{0};
     size_t target_rank{0};
     size_t target_index{0};
+    short is_completed{0};
     bool is_active{false};
   };
-
 
   /** Size of dictionary of embeddings. */
   size_t m_num_embeddings;
@@ -97,13 +98,14 @@ private:
   /** SGD learning rate. */
   DataType m_learning_rate;
 
-  TensorDataType* m_embeddings_buffer{nullptr};
+  /** SHMEM buffer to communicate embedding vectors. */
+  TensorDataType* m_workspace_buffer{nullptr};
+  /** Allocated size of @c m_workspace_buffer. */
+  size_t m_workspace_buffer_size{0};
 
-  std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> m_embeddings_grad;
-  TensorDataType* m_embeddings_grad_buffer{nullptr};
-  size_t m_embeddings_grad_buffer_size{0};
-
+  /** SHMEM buffer to communicate @c shmem_put_request objects. */
   shmem_put_request* m_requests_buffer{nullptr};
+  /** Allocated size of @c m_requests_buffer. */
   size_t m_requests_buffer_size{0};
 
 };
@@ -124,8 +126,12 @@ dist_embedding_layer<TensorDataType,Layout,Device>::dist_embedding_layer(
   : data_type_layer<TensorDataType>(comm),
     m_num_embeddings{num_embeddings},
     m_embedding_dim{embedding_dim},
-    m_learning_rate{learning_rate}
-{}
+    m_learning_rate{learning_rate} {
+#ifndef LBANN_DIST_EMBEDDING_SPARSE_SGD
+  // Learning rate is only used for sparse SGD
+  m_learning_rate = 1.0;
+#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
+}
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 dist_embedding_layer<TensorDataType,Layout,Device>::dist_embedding_layer(
@@ -174,6 +180,57 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_dims() {
   auto dims = this->get_input_dims();
   dims.push_back(static_cast<int>(m_embedding_dim));
   this->set_output_dims(dims);
+}
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
+  data_type_layer<TensorDataType>::setup_data();
+
+  // Construct default weights if needed
+  // Note: Randomly drawn from normal distribution with mean 0 and
+  // standard deviation 1.
+  if (!this->has_weights()) {
+    auto w = make_unique<data_type_weights<TensorDataType>>(this->get_comm());
+    auto init = make_unique<normal_initializer<TensorDataType>>(0,1);
+    auto opt = this->m_model->template create_optimizer<TensorDataType>();
+    w->set_name(this->get_name() + "_weights");
+    w->set_initializer(std::move(init));
+    w->set_optimizer(std::move(opt));
+    this->add_weights(w.get());
+    this->m_model->add_weights(std::move(w));
+  }
+  if (this->num_weights() != 1) {
+    LBANN_ERROR("attempted to setup ",
+                this->get_type()," layer \"",this->get_name(),"\" ",
+                "with an invalid number of weights ",
+                "(expected 1, found ",this->num_weights(),")");
+  }
+
+  // Configure embedding weights
+  auto& embeddings = this->get_data_type_weights(0);
+  {
+    auto dist = this->get_prev_activations().DistData();
+    dist.colDist = El::STAR;
+    dist.rowDist = El::VC;
+    embeddings.set_dims(
+      {static_cast<int>(m_embedding_dim)},
+      {static_cast<int>(m_num_embeddings)});
+    embeddings.set_matrix_distribution(dist);
+  }
+
+#ifdef LBANN_DIST_EMBEDDING_SPARSE_SGD
+  // Set dummy optimizer
+  // Note: This layer manually performs sparse SGD during backprop.
+  // However, the weights must have an optimizer to prevent the model
+  // from optimizing out the layer during the backprop.
+  /// @todo Sparse optimizers
+  this->get_data_type_weights(0).set_optimizer(
+    make_unique<sgd<TensorDataType>>(0.));
+#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
+
+  // Setup embedding weights
+  embeddings.setup();
+
 }
 
 // =============================================
