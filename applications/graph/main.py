@@ -79,6 +79,7 @@ decoder_embeddings = lbann.DistEmbedding(
     weights=decoder_embeddings_weights,
     num_embeddings=num_graph_nodes,
     embedding_dim=args.latent_dim,
+    sparse_sgd=True,
     learning_rate=args.learning_rate,
     device='cpu',
 )
@@ -87,6 +88,7 @@ encoder_embeddings = lbann.DistEmbedding(
     weights=encoder_embeddings_weights,
     num_embeddings=num_graph_nodes,
     embedding_dim=args.latent_dim,
+    sparse_sgd=True,
     learning_rate=args.learning_rate,
     device='cpu',
 )

@@ -83,7 +83,7 @@ private:
     size_t source_index{0};
     size_t target_rank{0};
     size_t target_index{0};
-    short is_completed{0};
+    long is_completed{0};
     bool is_active{false};
   };
 

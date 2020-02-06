@@ -447,9 +447,26 @@ CXX_FLAGS="${CXX_FLAGS} -g"
 C_FLAGS="${CXX_FLAGS}"
 
 # Hacks to build with OpenSHMEM
-# CXX_FLAGS="${CXX_FLAGS} -L/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release/lib -loshmem" # Lassen
-SOS_DIR=/g/g17/moon13/src/SOS/install/${CLUSTER}.llnl.gov
-CXX_FLAGS="${CXX_FLAGS} -I${SOS_DIR}/include -L${SOS_DIR}/lib -lsma -Wl,-rpath -Wl,${SOS_DIR}/lib" # Pascal
+if [ "${CLUSTER}" == "lassen" ]; then
+    CXX_FLAGS="${CXX_FLAGS} -L/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release/lib -loshmem"
+    WITH_SHMEM=1
+elif [ "${CLUSTER}" == "pascal" ]; then
+    SOS_DIR=/g/g17/moon13/src/SOS/install/${CLUSTER}.llnl.gov
+    CXX_FLAGS="${CXX_FLAGS} -I${SOS_DIR}/include -L${SOS_DIR}/lib -lsma -Wl,-rpath -Wl,${SOS_DIR}/lib"
+    WITH_SHMEM=1
+else
+    WITH_SHMEM=0
+fi
+C_FLAGS="${CXX_FLAGS}"
+
+# Hacks to build with NVSHMEM
+if [ "${CLUSTER}" == "lassen" ]; then
+    NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3.3/cuda-10.1_ppc64le
+    CXX_FLAGS="${CXX_FLAGS} -I${NVSHMEM_DIR}/include -L${NVSHMEM_DIR}/lib -lnvshmem"
+    WITH_NVSHMEM=1
+else
+    WITH_NVSHMEM=0
+fi
 C_FLAGS="${CXX_FLAGS}"
 
 # Set environment variables
@@ -807,7 +824,8 @@ cmake \
 -D LBANN_CONDUIT_DIR=${CONDUIT_DIR} \
 -D LBANN_BUILT_WITH_SPECTRUM=${WITH_SPECTRUM} \
 -D OPENBLAS_ARCH_COMMAND=${OPENBLAS_ARCH} \
--D LBANN_HAS_SHMEM=1 \
+-D LBANN_HAS_SHMEM=${WITH_SHMEM} \
+-D LBANN_HAS_NVSHMEM=${WITH_NVSHMEM} \
 ${SUPERBUILD_DIR}
 EOF
 )

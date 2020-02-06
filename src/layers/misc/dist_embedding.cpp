@@ -37,7 +37,7 @@ namespace lbann {
 namespace {
 
 /** Value to set SHMEM flags. */
-constexpr short flag_val = 1;
+constexpr long flag_val = 1;
 
 } // namespace <anon>
 
@@ -118,7 +118,6 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
 
   // Request embedding vectors from owner processes
   shmem_barrier_all();
-  LBANN_OMP_PARALLEL_FOR_COLLAPSE2
   for (size_t j=0; j<local_mini_batch_size; ++j) {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_index = static_cast<size_t>(std::floor(local_input(i,j)));
@@ -144,7 +143,6 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   shmem_barrier_all();
 
   // Send my embedding vectors to requesting processes
-  LBANN_OMP_PARALLEL_FOR
   for (size_t i=0; i<input_size*mini_batch_size; ++i) {
     const auto& req = m_requests_buffer[i];
     if (req.is_active && req.source_rank == rank) {
@@ -161,11 +159,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   // performance. I speculate that it yields the CPU, providing more
   // resources for the asynchronous communication.
   shmem_fence();
-  LBANN_OMP_PARALLEL_FOR
   for (size_t i=0; i<input_size*mini_batch_size; ++i) {
     auto& req = m_requests_buffer[i];
     if (req.is_active && req.source_rank == rank) {
-      shmem_short_put(
+      shmem_long_put(
         &req.is_completed,
         &flag_val,
         1,
@@ -175,12 +172,11 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   shmem_quiet();
 
   // Copy embedding vectors from workspace to output tensor
-  LBANN_OMP_PARALLEL_FOR_COLLAPSE2
   for (size_t j=0; j<local_mini_batch_size; ++j) {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_j = input.GlobalCol(j);
       auto& req = m_requests_buffer[i + global_j*input_size];
-      shmem_short_wait(&req.is_completed, 0);
+      shmem_wait(&req.is_completed, 0);
       req.is_completed = 0;
       const auto* x = workspace.LockedBuffer(0, i + global_j*input_size);
       auto* y = local_output.Buffer(i*m_embedding_dim, j);
@@ -230,7 +226,6 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
     m_embedding_dim);
 
   // Send gradients to owner processes
-  LBANN_OMP_PARALLEL_FOR_COLLAPSE2
   for (size_t j=0; j<local_mini_batch_size; ++j) {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_j = input.GlobalCol(j);
@@ -248,12 +243,11 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   // performance. I speculate that it yields the CPU, providing more
   // resources for the asynchronous communication.
   shmem_fence();
-  LBANN_OMP_PARALLEL_FOR_COLLAPSE2
   for (size_t j=0; j<local_mini_batch_size; ++j) {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_j = input.GlobalCol(j);
       auto& req = m_requests_buffer[i + global_j*input_size];
-      shmem_short_put(
+      shmem_long_put(
         &req.is_completed,
         &flag_val,
         1,
@@ -284,7 +278,6 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   const size_t num_omp_threads = omp_get_num_threads();
   const size_t embeddings_per_thread
     = (local_embeddings.Width() + num_omp_threads - 1) / num_omp_threads;
-  LBANN_OMP_PARALLEL_FOR
   for (size_t thread = 0; thread < num_omp_threads; ++thread) {
     const size_t index_start = thread * embeddings_per_thread;
     const size_t index_end = (thread+1) * embeddings_per_thread;
@@ -296,7 +289,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
           && req.source_index < index_end) {
 
         // Wait until gradient has been recieved
-        shmem_short_wait(&req.is_completed, 0);
+        shmem_wait(&req.is_completed, 0);
         req.is_completed = 0;
 
         // Update embedding with gradient
