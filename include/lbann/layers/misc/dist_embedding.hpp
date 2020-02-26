@@ -34,11 +34,24 @@
 
 namespace lbann {
 
+namespace dist_embedding_layer_impl {
+
+  /** Request for an embedding vector from a remote process. */
+  struct vector_request {
+    size_t source_rank{0};
+    size_t source_index{0};
+    size_t target_rank{0};
+    size_t target_index{0};
+    long is_completed{0};
+    bool is_active{false};
+  };
+
+} // namespace dist_embedding_layer_impl
+
 /** @brief Embedding layer with distributed weights.
  *
  *  @warning This is extremely experimental.
  *
- *  @todo GPU implementation
  *  @todo Arbitrary unbalanced distributions
  *  @todo Sparse SGD with optimizer class
  */
@@ -77,15 +90,7 @@ protected:
 
 private:
 
-  /** Request for a shmem_put from a remote process. */
-  struct shmem_put_request {
-    size_t source_rank{0};
-    size_t source_index{0};
-    size_t target_rank{0};
-    size_t target_index{0};
-    long is_completed{0};
-    bool is_active{false};
-  };
+  using RequestType = dist_embedding_layer_impl::vector_request;
 
   /** Size of dictionary of embeddings. */
   size_t m_num_embeddings;
@@ -105,8 +110,8 @@ private:
   /** Allocated size of @c m_workspace_buffer. */
   size_t m_workspace_buffer_size{0};
 
-  /** SHMEM buffer to communicate @c shmem_put_request objects. */
-  shmem_put_request* m_requests_buffer{nullptr};
+  /** SHMEM buffer to communicate requests for embedding vectors. */
+  RequestType* m_requests_buffer{nullptr};
   /** Allocated size of @c m_requests_buffer. */
   size_t m_requests_buffer_size{0};
 
@@ -255,12 +260,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data() {
 // Explicit template instantiation
 // =============================================
 
-/// @todo Implement on GPU with nvshmem
-// extern template class dist_embedding_layer<
-//   float, data_layout::DATA_PARALLEL, El::Device::GPU>;
-
 extern template class dist_embedding_layer<
   float, data_layout::DATA_PARALLEL, El::Device::CPU>;
+extern template class dist_embedding_layer<
+  float, data_layout::DATA_PARALLEL, El::Device::GPU>;
 
 } // namespace lbann
 

@@ -314,6 +314,13 @@ if (LBANN_HAS_CUDA)
   else ()
     set(LBANN_HAS_NCCL2 FALSE)
   endif ()
+
+  if (LBANN_HAS_NVSHMEM)
+    find_package(NVSHMEM REQUIRED)
+    set_property(TARGET cuda::toolkit PROPERTY
+      INTERFACE_COMPILE_OPTIONS $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_70>)
+  endif ()
+
 endif (LBANN_HAS_CUDA)
 
 # This shouldn't be here, but is ok for now. This will occasionally be
@@ -568,6 +575,11 @@ endif ()
 
 if (LBANN_HAS_PYTHON)
   target_link_libraries(lbann PUBLIC Python::Python)
+endif ()
+
+if (LBANN_HAS_NVSHMEM)
+  set_property(TARGET lbann PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+  target_link_libraries(lbann PUBLIC NVSHMEM::NVSHMEM)
 endif ()
 
 if (TARGET LBANN_CXX_FLAGS_werror)

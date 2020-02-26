@@ -38,6 +38,10 @@
 #ifdef LBANN_HAS_SHMEM
 #include <shmem.h>
 #endif // LBANN_HAS_SHMEM
+#ifdef LBANN_HAS_NVSHMEM
+#include "nvshmem.h"
+#include "nvshmemx.h"
+#endif // LBANN_HAS_NVSHMEM
 
 #include "lbann/comm.hpp"
 #include "lbann/utils/exception.hpp"
@@ -104,6 +108,20 @@ world_comm_ptr initialize(int& argc, char**& argv, int seed) {
     }
   }
 #endif // LBANN_HAS_SHMEM
+#ifdef LBANN_HAS_NVSHMEM
+  // Initialize NVSHMEM
+  {
+    auto mpi_comm = MPI_COMM_WORLD; // comm->get_world_comm().GetMPIComm();
+    nvshmemx_init_attr_t attr;
+    attr.mpi_comm = &mpi_comm;
+    setenv("NVSHMEM_MPI_LIB_NAME", "libmpi_ibm.so", 0); /// @todo This is an evil hack that only works for Lassen
+    auto status = nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
+    if (status != 0) {
+      nvshmem_finalize();
+      LBANN_ERROR("error initializing NVSHMEM");
+    }
+  }
+#endif // LBANN_HAS_NVSHMEM
 
   return comm;
 }
@@ -115,6 +133,9 @@ void finalize(lbann_comm* comm) {
 #ifdef LBANN_HAS_PYTHON
   python::finalize();
 #endif
+#ifdef LBANN_HAS_NVSHMEM
+  nvshmem_finalize();
+#endif // LBANN_HAS_SHMEM
 #ifdef LBANN_HAS_SHMEM
   shmem_finalize();
 #endif // LBANN_HAS_SHMEM

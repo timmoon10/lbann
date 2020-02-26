@@ -44,6 +44,7 @@ fi
 
 C_FLAGS=
 CXX_FLAGS=-DLBANN_SET_EL_RNG
+CUDA_FLAGS=
 Fortran_FLAGS=
 CLEAN_BUILD=0
 DATATYPE=float
@@ -75,6 +76,8 @@ USE_NINJA=0
 # by enabling LIBJPEG_TURBO_DIR
 WITH_LIBJPEG_TURBO=ON
 #LIBJPEG_TURBO_DIR="/p/lscratchh/brainusr/libjpeg-turbo-1.5.2"
+WITH_NVSHMEM=0
+NVSHMEM_DIR=
 
 function version_gt() { test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"; }
 
@@ -461,8 +464,8 @@ C_FLAGS="${CXX_FLAGS}"
 
 # Hacks to build with NVSHMEM
 if [ "${CLUSTER}" == "lassen" ]; then
-    NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3.3/cuda-10.1_ppc64le
-    CXX_FLAGS="${CXX_FLAGS} -I${NVSHMEM_DIR}/include -L${NVSHMEM_DIR}/lib -lnvshmem"
+    #NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3.3/cuda-10.1_ppc64le
+    NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3/nvshmem_0.3.3-0+cuda10_ppc64le
     WITH_NVSHMEM=1
 else
     WITH_NVSHMEM=0
@@ -808,6 +811,7 @@ cmake \
 -D LBANN_SB_BUILD_LBANN=ON \
 -D CMAKE_CXX_FLAGS="${CXX_FLAGS}" \
 -D CMAKE_C_FLAGS="${C_FLAGS}" \
+-D CMAKE_CUDA_FLAGS="${CUDA_FLAGS}" \
 -D CMAKE_C_COMPILER=${C_COMPILER} \
 -D CMAKE_CXX_COMPILER=${CXX_COMPILER} \
 -D CMAKE_Fortran_COMPILER=${Fortran_COMPILER} \
@@ -826,6 +830,7 @@ cmake \
 -D OPENBLAS_ARCH_COMMAND=${OPENBLAS_ARCH} \
 -D LBANN_HAS_SHMEM=${WITH_SHMEM} \
 -D LBANN_HAS_NVSHMEM=${WITH_NVSHMEM} \
+-D LBANN_SB_FWD_LBANN_NVSHMEM_DIR=${NVSHMEM_DIR} \
 ${SUPERBUILD_DIR}
 EOF
 )

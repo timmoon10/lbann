@@ -33,6 +33,7 @@
 #cmakedefine LBANN_ALUMINUM_MPI_PASSTHROUGH
 #cmakedefine LBANN_HAS_PYTHON
 #cmakedefine LBANN_HAS_SHMEM
+#cmakedefine LBANN_HAS_NVSHMEM
 
 #cmakedefine LBANN_DETERMINISTIC
 
