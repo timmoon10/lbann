@@ -38,10 +38,6 @@
 #ifdef LBANN_HAS_SHMEM
 #include <shmem.h>
 #endif // LBANN_HAS_SHMEM
-#ifdef LBANN_HAS_NVSHMEM
-#include "nvshmem.h"
-#include "nvshmemx.h"
-#endif // LBANN_HAS_NVSHMEM
 
 #include "lbann/comm.hpp"
 #include "lbann/utils/exception.hpp"
@@ -55,6 +51,9 @@
 #ifdef LBANN_HAS_PYTHON
 #include "lbann/utils/python.hpp"
 #endif
+#ifdef LBANN_HAS_NVSHMEM
+#include "lbann/utils/nvshmem.hpp"
+#endif
 
 #include <iostream>
 #include <string>
@@ -63,8 +62,24 @@
 namespace lbann {
 
 world_comm_ptr initialize(int& argc, char**& argv, int seed) {
+
+#ifdef LBANN_HAS_NVSHMEM
+  // Initialize NVSHMEM
+  /// @todo Move inside Hydrogen
+  /// @todo Handle multiple trainers
+  {
+    int thread_support = MPI_THREAD_MULTIPLE;
+    MPI_Init_thread(&argc, &argv, thread_support, &thread_support);
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    cudaSetDevice(rank % 4); /// @todo Evil hack for Lassen
+    nvshmem::initialize(MPI_COMM_WORLD);
+  }
+#endif // LBANN_HAS_NVSHMEM
+
   // Initialize Elemental.
   El::Initialize(argc, argv);
+
   // Create a new comm object.
   // Initial creation with every process in one model.
   auto comm = world_comm_ptr{new lbann_comm(0), &lbann::finalize };
@@ -108,20 +123,6 @@ world_comm_ptr initialize(int& argc, char**& argv, int seed) {
     }
   }
 #endif // LBANN_HAS_SHMEM
-#ifdef LBANN_HAS_NVSHMEM
-  // Initialize NVSHMEM
-  {
-    auto mpi_comm = MPI_COMM_WORLD; // comm->get_world_comm().GetMPIComm();
-    nvshmemx_init_attr_t attr;
-    attr.mpi_comm = &mpi_comm;
-    setenv("NVSHMEM_MPI_LIB_NAME", "libmpi_ibm.so", 0); /// @todo This is an evil hack that only works for Lassen
-    auto status = nvshmemx_init_attr(NVSHMEMX_INIT_WITH_MPI_COMM, &attr);
-    if (status != 0) {
-      nvshmem_finalize();
-      LBANN_ERROR("error initializing NVSHMEM");
-    }
-  }
-#endif // LBANN_HAS_NVSHMEM
 
   return comm;
 }
@@ -133,15 +134,15 @@ void finalize(lbann_comm* comm) {
 #ifdef LBANN_HAS_PYTHON
   python::finalize();
 #endif
-#ifdef LBANN_HAS_NVSHMEM
-  nvshmem_finalize();
-#endif // LBANN_HAS_SHMEM
 #ifdef LBANN_HAS_SHMEM
   shmem_finalize();
 #endif // LBANN_HAS_SHMEM
   if (comm != nullptr) {
     delete comm;
   }
+#ifdef LBANN_HAS_NVSHMEM
+  nvshmem::finalize();
+#endif // LBANN_HAS_SHMEM
   El::Finalize();
 }
 

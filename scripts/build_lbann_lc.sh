@@ -464,8 +464,9 @@ C_FLAGS="${CXX_FLAGS}"
 
 # Hacks to build with NVSHMEM
 if [ "${CLUSTER}" == "lassen" ]; then
-    #NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3.3/cuda-10.1_ppc64le
-    NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3/nvshmem_0.3.3-0+cuda10_ppc64le
+    NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3.3/cuda-10.1_ppc64le
+    #NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3/nvshmem_0.3.3-0+cuda10_ppc64le
+    CUDA_FLAGS="-gencode=arch=compute_70,code=sm_70"
     WITH_NVSHMEM=1
 else
     WITH_NVSHMEM=0
@@ -831,6 +832,8 @@ cmake \
 -D LBANN_HAS_SHMEM=${WITH_SHMEM} \
 -D LBANN_HAS_NVSHMEM=${WITH_NVSHMEM} \
 -D LBANN_SB_FWD_LBANN_NVSHMEM_DIR=${NVSHMEM_DIR} \
+-D LBANN_SB_FWD_HYDROGEN_CMAKE_CXX_FLAGS="${CXX_FLAGS}" \
+-D LBANN_SB_FWD_HYDROGEN_CMAKE_CUDA_FLAGS="${CUDA_FLAGS}" \
 ${SUPERBUILD_DIR}
 EOF
 )

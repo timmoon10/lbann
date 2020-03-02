@@ -34,16 +34,13 @@ if (NOT TARGET NVSHMEM::NVSHMEM)
     INTERFACE_LINK_LIBRARIES ${NVSHMEM_LIBRARY})
   set_property(TARGET NVSHMEM::NVSHMEM PROPERTY
     INTERFACE_INCLUDE_DIRECTORIES ${NVSHMEM_INCLUDE_DIRS})
-  set_property(TARGET NVSHMEM::NVSHMEM APPEND PROPERTY
-    INTERFACE_COMPILE_OPTIONS -DNVSHMEM_TARGET)
 endif ()
 
 if (NVSHMEM_FOUND)
-  string(APPEND CMAKE_CUDA_FLAGS " --relocatable-device-code=true")
   # Workaround for separable compilation with cooperative threading. see
   # https://stackoverflow.com/questions/53492528/cooperative-groupsthis-grid-causes-any-cuda-api-call-to-return-unknown-erro.
   # Adding this to INTERFACE_COMPILE_OPTIONS does not seem to solve the problem.
   # It seems that CMake does not add necessary options for device linking when cuda_add_executable/library is NOT used. See also
   # https://github.com/dealii/dealii/pull/5405
-  string(APPEND CMAKE_CUDA_FLAGS " -gencode=arch=compute_70,code=sm_70")
+  string(APPEND CMAKE_CUDA_FLAGS " -gencode=arch=compute_70,code=compute_70")
 endif ()

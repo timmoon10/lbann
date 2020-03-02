@@ -52,6 +52,11 @@ T* memcpy_warp(T* __restrict__ dest, const T* __restrict__ src, size_t n) {
   return dest;
 }
 
+template <typename T>
+void* voidstar_cast(T* ptr) {
+  return const_cast<void*>(reinterpret_cast<const void*>(ptr));
+}
+
 } // namespace <anon>
 
 // =============================================
@@ -339,22 +344,28 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   // Copy embedding vectors from workspace to output tensor
   {
     constexpr size_t block_size = 32;
-    dim3 block_dims, grid_dims;
-    block_dims.x = block_size;
-    grid_dims.x = input_size;
-    grid_dims.y = local_mini_batch_size;
-    wait_for_embeddings_kernel
-      <<<grid_dims, block_dims, 0, stream>>>(
-        m_embedding_dim,
-        {local_mini_batch_size, input_size},
-        m_requests_buffer,
-        {input_size, 1},
-        workspace.LockedBuffer(),
-        {static_cast<size_t>(workspace.LDim()), 1},
-        local_output.Buffer(),
-        {static_cast<size_t>(local_output.LDim()), 1},
-        embeddings.RowShift(),
-        embeddings.RowStride());
+    Size2 input_dims = {local_mini_batch_size, input_size};
+    Size2 requests_strides = {input_size, 1};
+    const TensorDataType* workspace_buffer = workspace.LockedBuffer();
+    Size2 workspace_strides = {static_cast<size_t>(workspace.LDim()), 1};
+    TensorDataType* output_buffer = local_output.Buffer();
+    Size2 output_strides = {static_cast<size_t>(local_output.LDim()), 1};
+    size_t embeddings_shift = embeddings.RowShift();
+    size_t embeddings_stride = embeddings.RowStride();
+    void *args[] = {
+      &m_embedding_dim,
+      &input_dims,
+      &m_requests_buffer,
+      &requests_strides,
+      voidstar_cast(&workspace_buffer),
+      &workspace_strides,
+      &output_buffer,
+      &output_strides,
+      &embeddings_shift,
+      &embeddings_stride};
+    nvshmemx_collective_launch(
+      reinterpret_cast<void*>(wait_for_embeddings_kernel<TensorDataType>),
+      0, block_size, args, 0, stream);
   }
 
 #endif // LBANN_HAS_NVSHMEM
@@ -560,20 +571,26 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   // Sparse SGD on local embeddings
   {
     constexpr size_t block_size = 32;
-    dim3 block_dims, grid_dims;
-    block_dims.x = block_size;
-    grid_dims.x = input_size * mini_batch_size;
-    sgd_kernel
-      <<<grid_dims, block_dims, 0, stream>>>(
-        m_learning_rate,
-        m_embedding_dim,
-        input_size * mini_batch_size,
-        m_requests_buffer,
-        workspace.LockedBuffer(),
-        {static_cast<size_t>(workspace.LDim()), 1},
-        embeddings.Buffer(),
-        {static_cast<size_t>(embeddings.LDim()), 1},
-        rank);
+    size_t num_requests = input_size * mini_batch_size;
+    Size2 requests_strides = {input_size, 1};
+    const TensorDataType* workspace_buffer = workspace.LockedBuffer();
+    Size2 workspace_strides = {static_cast<size_t>(workspace.LDim()), 1};
+    TensorDataType* embeddings_buffer = embeddings.Buffer();
+    Size2 embeddings_strides = {static_cast<size_t>(embeddings.LDim()), 1};
+    void *args[] = {
+      &m_learning_rate,
+      &m_embedding_dim,
+      &num_requests,
+      &m_requests_buffer,
+      &requests_strides,
+      &workspace_buffer,
+      &workspace_strides,
+      &embeddings_buffer,
+      &embeddings_strides,
+      voidstar_cast(&rank)};
+    nvshmemx_collective_launch(
+      reinterpret_cast<void*>(sgd_kernel<TensorDataType>),
+      0, block_size, args, 0, stream);
   }
 
   // Send gradients to dense optimizer if needed

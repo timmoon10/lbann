@@ -318,7 +318,7 @@ if (LBANN_HAS_CUDA)
   if (LBANN_HAS_NVSHMEM)
     find_package(NVSHMEM REQUIRED)
     set_property(TARGET cuda::toolkit PROPERTY
-      INTERFACE_COMPILE_OPTIONS $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_70>)
+      INTERFACE_COMPILE_OPTIONS $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_60>)
   endif ()
 
 endif (LBANN_HAS_CUDA)
@@ -502,13 +502,13 @@ if (LBANN_WITH_UNIT_TESTING)
   # Now that Catch2 has been found, start adding the unit tests
   include(CTest)
   include(Catch)
-  add_subdirectory(src/proto/unit_test)
-  add_subdirectory(src/utils/unit_test)
-  add_subdirectory(src/transforms/unit_test)
-  add_subdirectory(src/transforms/vision/unit_test)
+  #add_subdirectory(src/proto/unit_test)
+  #add_subdirectory(src/utils/unit_test)
+  #add_subdirectory(src/transforms/unit_test)
+  #add_subdirectory(src/transforms/vision/unit_test)
 
   # Add this one last
-  add_subdirectory(unit_test)
+  #add_subdirectory(unit_test)
 endif (LBANN_WITH_UNIT_TESTING)
 
 # Handle the documentation
@@ -529,7 +529,7 @@ configure_file(
   @ONLY)
 
 # Create the LBANN library
-add_library(lbann ${LBANN_SOURCES} ${LBANN_HEADERS} ${LBANN_CUDA_SOURCES})
+add_library(lbann STATIC ${LBANN_SOURCES} ${LBANN_HEADERS} ${LBANN_CUDA_SOURCES})
 
 target_include_directories(lbann PUBLIC
   $<BUILD_INTERFACE:${CMAKE_BINARY_DIR}>
@@ -626,7 +626,7 @@ endif ()
 # Add the rest of the things
 add_subdirectory(model_zoo)
 add_subdirectory(model_zoo/tests)
-add_subdirectory(model_zoo/jag_utils)
+#add_subdirectory(model_zoo/jag_utils)
 add_subdirectory(applications/CANDLE/pilot2/tools)
 add_subdirectory(tests)
 add_subdirectory(scripts)
