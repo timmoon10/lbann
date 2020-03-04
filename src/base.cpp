@@ -63,20 +63,6 @@ namespace lbann {
 
 world_comm_ptr initialize(int& argc, char**& argv, int seed) {
 
-#ifdef LBANN_HAS_NVSHMEM
-  // Initialize NVSHMEM
-  /// @todo Move inside Hydrogen
-  /// @todo Handle multiple trainers
-  {
-    int thread_support = MPI_THREAD_MULTIPLE;
-    MPI_Init_thread(&argc, &argv, thread_support, &thread_support);
-    int rank;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    cudaSetDevice(rank % 4); /// @todo Evil hack for Lassen
-    nvshmem::initialize(MPI_COMM_WORLD);
-  }
-#endif // LBANN_HAS_NVSHMEM
-
   // Initialize Elemental.
   El::Initialize(argc, argv);
 
@@ -123,6 +109,12 @@ world_comm_ptr initialize(int& argc, char**& argv, int seed) {
     }
   }
 #endif // LBANN_HAS_SHMEM
+#ifdef LBANN_HAS_NVSHMEM
+  // Initialize NVSHMEM
+  /// @todo Move inside Hydrogen
+  // nvshmem::initialize(comm->get_trainer_comm().GetMPIComm()); /// @todo Restore
+  nvshmem::initialize(MPI_COMM_WORLD);
+#endif // LBANN_HAS_NVSHMEM
 
   return comm;
 }
@@ -134,15 +126,15 @@ void finalize(lbann_comm* comm) {
 #ifdef LBANN_HAS_PYTHON
   python::finalize();
 #endif
+#ifdef LBANN_HAS_NVSHMEM
+  nvshmem::finalize();
+#endif // LBANN_HAS_SHMEM
 #ifdef LBANN_HAS_SHMEM
   shmem_finalize();
 #endif // LBANN_HAS_SHMEM
   if (comm != nullptr) {
     delete comm;
   }
-#ifdef LBANN_HAS_NVSHMEM
-  nvshmem::finalize();
-#endif // LBANN_HAS_SHMEM
   El::Finalize();
 }
 
