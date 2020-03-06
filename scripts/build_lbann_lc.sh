@@ -129,6 +129,7 @@ Options:
   ${C}--with-conduit              Build with conduit interface
   ${C}--ninja                     Generate ninja files instead of makefiles
   ${C}--ninja-processes${N} <val> Number of parallel processes for ninja.
+  ${C}--nvshmem${N}               Enable NVSHMEM
 EOF
 }
 
@@ -272,6 +273,9 @@ while :; do
             ;;
         --reconfigure)
             RECONFIGURE=1
+            ;;
+        --nvshmem)
+            WITH_NVSHMEM=1
             ;;
         -?*)
             # Unknown option
@@ -445,33 +449,16 @@ fi
 CXX_FLAGS="${CXX_FLAGS} -ldl"
 C_FLAGS="${CXX_FLAGS}"
 
-# Debug flag
-CXX_FLAGS="${CXX_FLAGS} -g"
-C_FLAGS="${CXX_FLAGS}"
-
-# Hacks to build with OpenSHMEM
-if [ "${CLUSTER}" == "lassen" ]; then
-    CXX_FLAGS="${CXX_FLAGS} -L/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release/lib -loshmem"
-    WITH_SHMEM=1
-elif [ "${CLUSTER}" == "pascal" ]; then
-    SOS_DIR=/g/g17/moon13/src/SOS/install/${CLUSTER}.llnl.gov
-    CXX_FLAGS="${CXX_FLAGS} -I${SOS_DIR}/include -L${SOS_DIR}/lib -lsma -Wl,-rpath -Wl,${SOS_DIR}/lib"
-    WITH_SHMEM=1
-else
-    WITH_SHMEM=0
-fi
-C_FLAGS="${CXX_FLAGS}"
-
 # Hacks to build with NVSHMEM
-if [ "${CLUSTER}" == "lassen" ]; then
-    NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3.3/cuda-10.1_ppc64le
-    #NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3/nvshmem_0.3.3-0+cuda10_ppc64le
-    CUDA_FLAGS="-gencode=arch=compute_70,code=sm_70"
-    WITH_NVSHMEM=1
-else
-    WITH_NVSHMEM=0
+if [ ${WITH_NVSHMEM} -ne 0 ]; then
+    if [ "${CLUSTER}" == "lassen" ]; then
+        NVSHMEM_DIR=/usr/workspace/wsb/brain/nvshmem/nvshmem_0.3.3/cuda-10.1_ppc64le
+        CUDA_FLAGS="-gencode=arch=compute_70,code=sm_70"
+    else
+        echo "NVSHMEM is currently only supported on Lassen"
+        exit 1
+    fi
 fi
-C_FLAGS="${CXX_FLAGS}"
 
 # Set environment variables
 CC=${C_COMPILER}
@@ -830,10 +817,8 @@ cmake \
 -D LBANN_BUILT_WITH_SPECTRUM=${WITH_SPECTRUM} \
 -D OPENBLAS_ARCH_COMMAND=${OPENBLAS_ARCH} \
 -D LBANN_HAS_SHMEM=${WITH_SHMEM} \
--D LBANN_HAS_NVSHMEM=${WITH_NVSHMEM} \
+-D LBANN_WITH_NVSHMEM=${WITH_NVSHMEM} \
 -D LBANN_SB_FWD_LBANN_NVSHMEM_DIR=${NVSHMEM_DIR} \
--D LBANN_SB_FWD_HYDROGEN_CMAKE_CXX_FLAGS="${CXX_FLAGS}" \
--D LBANN_SB_FWD_HYDROGEN_CMAKE_CUDA_FLAGS="${CUDA_FLAGS}" \
 ${SUPERBUILD_DIR}
 EOF
 )

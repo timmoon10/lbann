@@ -315,11 +315,14 @@ if (LBANN_HAS_CUDA)
     set(LBANN_HAS_NCCL2 FALSE)
   endif ()
 
-  if (LBANN_HAS_NVSHMEM)
+  if (LBANN_WITH_NVSHMEM)
     find_package(NVSHMEM REQUIRED)
     set_property(TARGET cuda::toolkit PROPERTY
-      INTERFACE_COMPILE_OPTIONS $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_60>)
+      INTERFACE_COMPILE_OPTIONS $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_70>)
+    # Build LBANN as a static library to get around a bug in NVSHMEM
+    set(BUILD_SHARED_LIBS OFF)
   endif ()
+  set(LBANN_HAS_NVSHMEM "${NVSHMEM_FOUND}")
 
 endif (LBANN_HAS_CUDA)
 
