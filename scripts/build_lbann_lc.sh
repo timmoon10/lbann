@@ -449,6 +449,18 @@ fi
 CXX_FLAGS="${CXX_FLAGS} -ldl"
 C_FLAGS="${CXX_FLAGS}"
 
+# Hacks to build with OpenSHMEM
+WITH_SHMEM=0
+if [ "${CLUSTER}" == "lassen" ]; then
+    CXX_FLAGS="${CXX_FLAGS} -L/usr/tce/packages/spectrum-mpi/ibm/spectrum-mpi-rolling-release/lib -loshmem"
+    WITH_SHMEM=1
+elif [ "${CLUSTER}" == "pascal" ]; then
+    SOS_DIR=/g/g17/moon13/src/SOS/install/${CLUSTER}.llnl.gov
+    CXX_FLAGS="${CXX_FLAGS} -I${SOS_DIR}/include -L${SOS_DIR}/lib -lsma -Wl,-rpath -Wl,${SOS_DIR}/lib"
+    WITH_SHMEM=1
+fi
+C_FLAGS="${CXX_FLAGS}"
+
 # Hacks to build with NVSHMEM
 if [ ${WITH_NVSHMEM} -ne 0 ]; then
     if [ "${CLUSTER}" == "lassen" ]; then
