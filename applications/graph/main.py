@@ -81,7 +81,6 @@ decoder_embeddings = lbann.DistEmbedding(
     embedding_dim=args.latent_dim,
     sparse_sgd=True,
     learning_rate=args.learning_rate,
-    device='cpu',
 )
 encoder_embeddings = lbann.DistEmbedding(
     input_slice,
@@ -90,7 +89,6 @@ encoder_embeddings = lbann.DistEmbedding(
     embedding_dim=args.latent_dim,
     sparse_sgd=True,
     learning_rate=args.learning_rate,
-    device='cpu',
 )
 
 # Skip-Gram with negative sampling
@@ -111,10 +109,9 @@ obj = [
     lbann.LayerTerm(obj_negative, scale=-1/num_negative_samples),
 ]
 
-# Perform all computation on CPU
-# TODO: GPU implementation
-for l in lbann.traverse_layer_graph(input_):
-    l.device = 'cpu'
+# # Perform all computation on CPU
+# for l in lbann.traverse_layer_graph(input_):
+#     l.device = 'cpu'
 
 # ----------------------------------
 # Create data reader
@@ -125,6 +122,7 @@ _reader = reader.reader.add()
 _reader.name = 'python'
 _reader.role = 'train'
 _reader.percent_of_data_to_use = 1.0
+#_reader.percent_of_data_to_use = 0.00349655 ### @todo Remove
 _reader.python.module = 'dataset'
 _reader.python.module_dir = os.path.dirname(os.path.realpath(__file__))
 _reader.python.sample_function = 'get_sample'

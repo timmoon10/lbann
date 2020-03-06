@@ -26,13 +26,11 @@
 
 #include "lbann/layers/misc/dist_embedding.hpp"
 #include "lbann/utils/cuda.hpp"
+#ifdef LBANN_HAS_NVSHMEM
+#include "lbann/utils/nvshmem.hpp"
+#endif // LBANN_HAS_NVSHMEM
 
 #include <layers.pb.h>
-
-#ifdef LBANN_HAS_NVSHMEM
-#include "nvshmem.h"
-#include "nvshmemx.h"
-#endif // LBANN_HAS_NVSHMEM
 
 namespace lbann {
 
@@ -67,7 +65,7 @@ size_t distmat_global_index(size_t local_index, size_t shift, size_t stride) {
 /** See El::AbstractDistMatrix::LocalCol. */
 __device__ __forceinline__
 size_t distmat_local_index(size_t global_index, size_t rank, size_t align, size_t stride) {
-  size_t shift = (long(rank) - align) % stride;
+  auto shift = (long(rank) - align) % stride;
   if (shift < 0) {
     shift += stride;
   }
@@ -100,6 +98,7 @@ inline void launch_cuda_kernel(
       stream));
 }
 
+#ifdef LBANN_HAS_NVSHMEM
 template <typename Kernel, typename... ArgTs>
 inline void launch_nvshmem_collective_kernel(
   const Kernel& kernel,
@@ -128,6 +127,7 @@ inline void launch_nvshmem_collective_kernel(
       "(error ",status,")");
   }
 }
+#endif // LBANN_HAS_NVSHMEM
 
 } // namespace <anon>
 
@@ -139,8 +139,12 @@ template <typename TensorDataType, data_layout Layout, El::Device Device>
 dist_embedding_layer<TensorDataType,Layout,Device>::~dist_embedding_layer()
 {
 #ifdef LBANN_HAS_NVSHMEM
-  nvshmem_free(m_workspace_buffer);
-  nvshmem_free(m_requests_buffer);
+  if (m_workspace_buffer != nullptr) {
+    nvshmem_free(m_workspace_buffer);
+  }
+  if (m_requests_buffer != nullptr) {
+    nvshmem_free(m_requests_buffer);
+  }
 #endif // LBANN_HAS_NVSHMEM
 }
 
@@ -359,16 +363,16 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
 
   // GPU objects
   auto&& stream = El::GPUManager::Stream();
+  nvshmem::initialize();
 
   // SHMEM processing element
   const size_t rank = this->get_comm()->get_rank_in_trainer();
 
   // Initialize NVSHMEM buffer for embedding vectors
   if (m_workspace_buffer_size < output_size * mini_batch_size) {
-    nvshmem_free(m_workspace_buffer);
     m_workspace_buffer_size = output_size * mini_batch_size;
-    m_workspace_buffer = reinterpret_cast<TensorDataType*>(
-      nvshmem_malloc(m_workspace_buffer_size*sizeof(RequestType)));
+    m_workspace_buffer = nvshmem::realloc(m_workspace_buffer,
+                                          m_workspace_buffer_size);
   }
   LocalMat workspace(
     m_embedding_dim,
@@ -378,10 +382,9 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
 
   // Initialize NVSHMEM buffer for shmem_put requests
   if (m_requests_buffer_size < input_size * mini_batch_size) {
-    nvshmem_free(m_requests_buffer);
     m_requests_buffer_size = input_size * mini_batch_size;
-    m_requests_buffer = reinterpret_cast<RequestType*>(
-      nvshmem_malloc(m_requests_buffer_size*sizeof(RequestType)));
+    m_requests_buffer = nvshmem::realloc(m_requests_buffer,
+                                         m_requests_buffer_size);
   }
   CHECK_CUDA(
     cudaMemsetAsync(

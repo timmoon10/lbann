@@ -116,20 +116,6 @@ world_comm_ptr initialize(int& argc, char**& argv, int seed) {
     }
   }
 #endif // LBANN_HAS_SHMEM
-#ifdef LBANN_HAS_NVSHMEM
-  // Initialize NVSHMEM
-  /// @todo Move inside Hydrogen
-  // nvshmem::initialize(comm->get_trainer_comm().GetMPIComm()); /// @todo Restore
-  nvshmem::initialize(MPI_COMM_WORLD);
-#endif // LBANN_HAS_NVSHMEM
-
-#ifdef LBANN_HAS_NVSHMEM
-  // Initialize NVSHMEM
-  // tym (3/3/20): I get an error when initializing NVSHMEM with
-  // anything other than MPI_COMM_WORLD.
-  // nvshmem::initialize(comm->get_trainer_comm().GetMPIComm()); /// @todo Restore
-  nvshmem::initialize(MPI_COMM_WORLD);
-#endif // LBANN_HAS_NVSHMEM
 
   return comm;
 }
