@@ -249,11 +249,18 @@ __global__ void send_embeddings_kernel(
   for (size_t i = i_start; i < i_end; ++i) {
     const auto& req = requests[i];
     if (req.is_active && req.source_rank == rank) {
-      nvshmemx_putmem_nbi_warp(
-        &workspace[req.target_index * workspace_strides[0]],
+      auto* workspace_ptr = &workspace[req.target_index * workspace_strides[0]];
+      memcpy_warp(
+        workspace_ptr,
         &embeddings[req.source_index * embeddings_strides[0]],
-        embedding_dim*sizeof(TensorDataType),
-        req.target_rank);
+        embedding_dim);
+      if (req.target_rank != rank) {
+        nvshmemx_putmem_nbi_warp(
+          workspace_ptr,
+          workspace_ptr,
+          embedding_dim*sizeof(TensorDataType),
+          req.target_rank);
+      }
     }
   }
 
@@ -263,15 +270,17 @@ __global__ void send_embeddings_kernel(
     nvshmem_fence();
   }
   __syncwarp();
-  const long flag_val{1};
   for (size_t i = i_start; i < i_end; ++i) {
     auto& req = requests[i];
     if (req.is_active && req.source_rank == rank) {
-      nvshmemx_long_put_warp(
-        &req.is_completed,
-        &flag_val,
-        1,
-        req.target_rank);
+      req.is_completed = 1;
+      if (req.target_rank != rank) {
+        nvshmemx_long_put_nbi_warp(
+          &req.is_completed,
+          &req.is_completed,
+          1,
+          req.target_rank);
+      }
     }
   }
 
@@ -511,11 +520,18 @@ __global__ void send_gradients_kernel(
       const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
       auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
       if (req.is_active && req.target_rank == rank) {
-        nvshmemx_putmem_nbi_warp(
-          &workspace[req.target_index * workspace_strides[0]],
+        auto* workspace_ptr = &workspace[req.target_index * workspace_strides[0]];
+        memcpy_warp(
+          workspace_ptr,
           &output_grad[i*embedding_dim + j*output_grad_strides[0]],
-          embedding_dim*sizeof(TensorDataType),
-          req.source_rank);
+          embedding_dim);
+        if (req.source_rank != rank) {
+          nvshmemx_putmem_nbi_warp(
+            workspace_ptr,
+            workspace_ptr,
+            embedding_dim*sizeof(TensorDataType),
+            req.source_rank);
+        }
       }
     }
   }
@@ -525,16 +541,18 @@ __global__ void send_gradients_kernel(
     nvshmem_fence();
   }
   __syncwarp();
-  const long flag_val{1};
   for (size_t j = bidy; j < input_dims[0]; j += nblocksy) {
     for (size_t i = i_start; i < i_end; ++i) {
       const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
       auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
-      nvshmemx_long_put_warp(
-        &req.is_completed,
-        &flag_val,
-        1,
-        req.source_rank);
+      req.is_completed = 1;
+      if (req.source_rank != rank) {
+        nvshmemx_long_put_nbi_warp(
+          &req.is_completed,
+          &req.is_completed,
+          1,
+          req.source_rank);
+      }
     }
   }
 
