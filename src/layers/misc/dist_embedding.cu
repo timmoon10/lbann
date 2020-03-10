@@ -43,10 +43,10 @@ using Size2 = cuda::array<size_t, 2>;
 template <typename T> __device__ __forceinline__
 T* memcpy_warp(T* __restrict__ dest, const T* __restrict__ src, size_t n) {
   constexpr size_t warp_size = 32;
-  const size_t tid = threadIdx.x;
-  for (size_t i = tid; i < n; i += warp_size) {
+  for (size_t i = threadIdx.x; i < n; i += warp_size) {
     dest[i] = src[i];
   }
+  __syncwarp();
   return dest;
 }
 
@@ -65,10 +65,7 @@ size_t distmat_global_index(size_t local_index, size_t shift, size_t stride) {
 /** See El::AbstractDistMatrix::LocalCol. */
 __device__ __forceinline__
 size_t distmat_local_index(size_t global_index, size_t rank, size_t align, size_t stride) {
-  auto shift = (long(rank) - align) % stride;
-  if (shift < 0) {
-    shift += stride;
-  }
+  auto shift = (stride + rank - align) % stride;
   if (global_index > shift) {
     return (global_index - shift - 1) / stride + 1;
   }
@@ -175,11 +172,11 @@ __global__ void send_requests_kernel(
   size_t embeddings_rowstride) {
 
   // Indices
-  const size_t tid = threadIdx.x;
   const size_t bidx = blockIdx.x;
   const size_t bidy = blockIdx.y;
   const size_t nblocksx = gridDim.x;
   const size_t nblocksy = gridDim.y;
+  const bool am_warp_master = threadIdx.x == 0;
 
   const size_t i_per_block = (input_dims[1] + nblocksx - 1) / nblocksx;
   const size_t i_start = bidx * i_per_block;
@@ -195,16 +192,16 @@ __global__ void send_requests_kernel(
 
       // Figure out which process owns embedding vector
       auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
-      if (tid == 0) {
+      if (am_warp_master) {
         req.source_rank = distmat_index_owner(global_index, embeddings_rowalign, embeddings_rowstride);
         req.source_index = distmat_local_index(global_index, req.source_rank, embeddings_rowalign, embeddings_rowstride);
         req.target_rank = rank;
         req.target_index = i + global_j*input_dims[1];
         req.is_active = true;
       }
+      __syncwarp();
 
       // Send request to owner process
-      __syncwarp();
       nvshmemx_putmem_nbi_warp(
         &req,
         &req,
@@ -236,9 +233,9 @@ __global__ void send_embeddings_kernel(
   size_t rank) {
 
   // Indices
-  const size_t tid = threadIdx.x;
   const size_t bid = blockIdx.x;
   const size_t nblocks = gridDim.x;
+  const bool am_warp_master = threadIdx.x == 0;
 
   // Assign requests to CUDA blocks
   const size_t requests_per_block = (num_requests + nblocks - 1) / nblocks;
@@ -266,14 +263,16 @@ __global__ void send_embeddings_kernel(
 
   // Notify requesting processes that they have recieved my embedding vectors
   __syncwarp();
-  if (tid == 0) {
+  if (am_warp_master) {
     nvshmem_fence();
   }
-  __syncwarp();
   for (size_t i = i_start; i < i_end; ++i) {
     auto& req = requests[i];
     if (req.is_active && req.source_rank == rank) {
-      req.is_completed = 1;
+      if (am_warp_master) {
+        req.is_completed = 1;
+      }
+      __syncwarp();
       if (req.target_rank != rank) {
         nvshmemx_long_put_nbi_warp(
           &req.is_completed,
@@ -308,11 +307,11 @@ __global__ void wait_for_embeddings_kernel(
   size_t input_rowstride) {
 
   // Indices
-  const size_t tid = threadIdx.x;
   const size_t bidx = blockIdx.x;
   const size_t bidy = blockIdx.y;
   const size_t nblocksx = gridDim.x;
   const size_t nblocksy = gridDim.y;
+  const bool am_warp_master = threadIdx.x == 0;
 
   // Assign requests to CUDA blocks
   const size_t i_per_block = (input_dims[1] + nblocksx - 1) / nblocksx;
@@ -325,7 +324,7 @@ __global__ void wait_for_embeddings_kernel(
 
       // Wait for embedding vector to arrive
       auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
-      if (tid == 0) {
+      if (am_warp_master) {
         nvshmem_wait(&req.is_completed, 0);
         req.is_completed = 0;
       }
@@ -450,6 +449,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
       Size2{size_t(workspace.LDim()), 1},
       rank);
   }
+  nvshmemx_quiet_on_stream(stream);
 
   // Copy embedding vectors from workspace to output tensor
   {
@@ -498,16 +498,15 @@ __global__ void send_gradients_kernel(
   Size2 output_grad_strides,
   TensorDataType* __restrict__ workspace,
   Size2 workspace_strides,
-  size_t rank,
   size_t input_rowshift,
   size_t input_rowstride) {
 
   // Indices
-  const size_t tid = threadIdx.x;
   const size_t bidx = blockIdx.x;
   const size_t bidy = blockIdx.y;
   const size_t nblocksx = gridDim.x;
   const size_t nblocksy = gridDim.y;
+  const bool am_warp_master = threadIdx.x == 0;
 
   // Assign requests to CUDA blocks
   const size_t i_per_block = (input_dims[1] + nblocksx - 1) / nblocksx;
@@ -519,34 +518,35 @@ __global__ void send_gradients_kernel(
     for (size_t i = i_start; i < i_end; ++i) {
       const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
       auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
-      if (req.is_active && req.target_rank == rank) {
-        auto* workspace_ptr = &workspace[req.target_index * workspace_strides[0]];
-        memcpy_warp(
+      auto* workspace_ptr = &workspace[req.target_index * workspace_strides[0]];
+      memcpy_warp(
+        workspace_ptr,
+        &output_grad[i*embedding_dim + j*output_grad_strides[0]],
+        embedding_dim);
+      if (req.source_rank != req.target_rank) {
+        nvshmemx_putmem_nbi_warp(
           workspace_ptr,
-          &output_grad[i*embedding_dim + j*output_grad_strides[0]],
-          embedding_dim);
-        if (req.source_rank != rank) {
-          nvshmemx_putmem_nbi_warp(
-            workspace_ptr,
-            workspace_ptr,
-            embedding_dim*sizeof(TensorDataType),
-            req.source_rank);
-        }
+          workspace_ptr,
+          embedding_dim*sizeof(TensorDataType),
+          req.source_rank);
       }
     }
   }
 
   // Notify owner processes that they have recieved gradients
-  if (tid == 0) {
+  __syncwarp();
+  if (am_warp_master) {
     nvshmem_fence();
   }
-  __syncwarp();
   for (size_t j = bidy; j < input_dims[0]; j += nblocksy) {
     for (size_t i = i_start; i < i_end; ++i) {
       const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
       auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
-      req.is_completed = 1;
-      if (req.source_rank != rank) {
+      if (am_warp_master) {
+        req.is_completed = 1;
+      }
+      __syncwarp();
+      if (req.source_rank != req.target_rank) {
         nvshmemx_long_put_nbi_warp(
           &req.is_completed,
           &req.is_completed,
@@ -583,25 +583,25 @@ __global__ void sgd_kernel(
   const size_t bid = blockIdx.x;
   const size_t nblocks = gridDim.x;
   constexpr size_t warp_size = 32;
+  const bool am_warp_master = threadIdx.x == 0;
 
   // Assign requests to CUDA blocks
   const size_t requests_per_block = (num_requests + nblocks - 1) / nblocks;
   const size_t i_start = bid * requests_per_block;
   const size_t i_end = cuda::min((bid+1) * requests_per_block, num_requests);
 
-  // Send my embedding vectors to requesting processes
   for (size_t i = i_start; i < i_end; ++i) {
     auto& req = requests[i];
     if (req.is_active && req.source_rank == rank) {
 
-      // Wait until gradient has been recieved
-      if (tid == 0) {
+      // Wait for gradient to arrive
+      if (am_warp_master) {
         nvshmem_wait(&req.is_completed, 0);
         req.is_completed = 0;
       }
       __syncwarp();
 
-      // Update embedding with gradient
+      // Update embedding vector with gradient
       const auto* __restrict__ dw = &workspace[req.target_index * workspace_strides[0]];
       auto* __restrict__ w = &embeddings[req.source_index * embeddings_strides[0]];
       for (size_t k = tid; k < embedding_dim; k += warp_size) {
@@ -671,13 +671,13 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
       m_requests_buffer,
       Size2{input_size, 1},
       local_output_grad.LockedBuffer(),
-      Size2{static_cast<size_t>(local_output_grad.LDim()), 1},
+      Size2{size_t(local_output_grad.LDim()), 1},
       workspace.Buffer(),
-      Size2{static_cast<size_t>(workspace.LDim()), 1},
-      rank,
+      Size2{size_t(workspace.LDim()), 1},
       size_t(input.RowShift()),
       size_t(input.RowStride()));
   }
+  nvshmemx_quiet_on_stream(stream);
 
   // Configure local embeddings for sparse SGD
   // Note: If we are not doing sparse SGD, then we initialize
