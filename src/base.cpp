@@ -64,8 +64,10 @@ namespace lbann {
 MPI_Errhandler err_handle;
 
 world_comm_ptr initialize(int& argc, char**& argv, int seed) {
+
   // Initialize Elemental.
   El::Initialize(argc, argv);
+
   // Create a new comm object.
   // Initial creation with every process in one model.
   auto comm = world_comm_ptr{new lbann_comm(0), &lbann::finalize };
@@ -115,14 +117,6 @@ world_comm_ptr initialize(int& argc, char**& argv, int seed) {
   }
 #endif // LBANN_HAS_SHMEM
 
-#ifdef LBANN_HAS_NVSHMEM
-  // Initialize NVSHMEM
-  // tym (3/3/20): I get an error when initializing NVSHMEM with
-  // anything other than MPI_COMM_WORLD.
-  // nvshmem::initialize(comm->get_trainer_comm().GetMPIComm()); /// @todo Restore
-  nvshmem::initialize(MPI_COMM_WORLD);
-#endif // LBANN_HAS_NVSHMEM
-
   return comm;
 }
 
@@ -137,6 +131,9 @@ void finalize(lbann_comm* comm) {
 #ifdef LBANN_HAS_PYTHON
   python::finalize();
 #endif
+#ifdef LBANN_HAS_NVSHMEM
+  nvshmem::finalize();
+#endif // LBANN_HAS_SHMEM
 #ifdef LBANN_HAS_SHMEM
   shmem_finalize();
 #endif // LBANN_HAS_SHMEM

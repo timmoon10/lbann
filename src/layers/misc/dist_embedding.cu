@@ -25,159 +25,713 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "lbann/layers/misc/dist_embedding.hpp"
-#include "lbann/utils/memory.hpp"
+#include "lbann/utils/cuda.hpp"
+#ifdef LBANN_HAS_NVSHMEM
+#include "lbann/utils/nvshmem.hpp"
+#endif // LBANN_HAS_NVSHMEM
 
 #include <layers.pb.h>
 
 namespace lbann {
 
+namespace {
+
+using RequestType = dist_embedding_layer_impl::vector_request;
+using Size2 = cuda::array<size_t, 2>;
+
+/// @todo This would be fun to optimize further.
+template <typename T> __device__ __forceinline__
+T* memcpy_warp(T* __restrict__ dest, const T* __restrict__ src, size_t n) {
+  constexpr size_t warp_size = 32;
+  for (size_t i = threadIdx.x; i < n; i += warp_size) {
+    dest[i] = src[i];
+  }
+  __syncwarp();
+  return dest;
+}
+
+/** See El::AbstractDistMatrix::ColOwner. */
+__device__ __forceinline__
+size_t distmat_index_owner(size_t global_index, size_t align, size_t stride) {
+  return (global_index + align) % stride;
+}
+
+/** See El::AbstractDistMatrix::GlobalCol. */
+__device__ __forceinline__
+size_t distmat_global_index(size_t local_index, size_t shift, size_t stride) {
+  return shift + local_index * stride;
+}
+
+/** See El::AbstractDistMatrix::LocalCol. */
+__device__ __forceinline__
+size_t distmat_local_index(size_t global_index, size_t rank, size_t align, size_t stride) {
+  auto shift = (stride + rank - align) % stride;
+  if (global_index > shift) {
+    return (global_index - shift - 1) / stride + 1;
+  }
+  else {
+    return 0;
+  }
+}
+
+template <typename Kernel, typename... ArgTs>
+inline void launch_cuda_kernel(
+  const Kernel& kernel,
+  dim3 grid_dims,
+  dim3 block_dims,
+  size_t shared_mem,
+  cudaStream_t stream,
+  ArgTs... args) {
+  void *arg_list[] = {
+    const_cast<void*>(reinterpret_cast<const void*>(&args))...
+  };
+  CHECK_CUDA(
+    cudaLaunchKernel(
+      reinterpret_cast<const void*>(&kernel),
+      grid_dims,
+      block_dims,
+      arg_list,
+      shared_mem,
+      stream));
+}
+
+#ifdef LBANN_HAS_NVSHMEM
+template <typename Kernel, typename... ArgTs>
+inline void launch_nvshmem_collective_kernel(
+  const Kernel& kernel,
+  dim3 grid_dims,
+  dim3 block_dims,
+  size_t shared_mem,
+  cudaStream_t stream,
+  ArgTs... args) {
+  if (grid_dims.x == 0) {
+    grid_dims.y = 0;
+    grid_dims.z = 0;
+  }
+  void *arg_list[] = {
+    const_cast<void*>(reinterpret_cast<const void*>(&args))...
+  };
+  auto status = nvshmemx_collective_launch(
+    reinterpret_cast<const void*>(&kernel),
+    grid_dims,
+    block_dims,
+    arg_list,
+    shared_mem,
+    stream);
+  if (status != 0) {
+    LBANN_ERROR(
+      "Failed to launch NVSHMEM collective kernel ",
+      "(error ",status,")");
+  }
+}
+#endif // LBANN_HAS_NVSHMEM
+
+} // namespace <anon>
+
 // =============================================
-// Setup functions
+// Life cycle functions
 // =============================================
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 dist_embedding_layer<TensorDataType,Layout,Device>::~dist_embedding_layer()
-{}
+{
+#ifdef LBANN_HAS_NVSHMEM
+  if (m_workspace_buffer != nullptr) {
+    nvshmem_free(m_workspace_buffer);
+  }
+  if (m_requests_buffer != nullptr) {
+    nvshmem_free(m_requests_buffer);
+  }
+#endif // LBANN_HAS_NVSHMEM
+}
 
 // =============================================
 // Forward prop
 // =============================================
 
-template <typename TensorDataType, data_layout Layout, El::Device Device>
-void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
-  using LocalMat = El::Matrix<TensorDataType, Device>;
-  using CPULocalMat = El::Matrix<TensorDataType, El::Device::CPU>;
+namespace {
 
-  // Local data
-  const auto& local_embeddings = dynamic_cast<const LocalMat&>(this->get_data_type_weights(0).get_values().LockedMatrix());
-  const auto& local_input = dynamic_cast<const LocalMat&>(this->get_local_prev_activations());
-  auto& local_output = dynamic_cast<LocalMat&>(this->get_local_activations());
-  const size_t input_size = this->get_input_size();
-  const size_t local_mini_batch_size = local_input.Width();
+#ifdef LBANN_HAS_NVSHMEM
+/** Request embedding vectors from owner processes.
+ *
+ *  Block dimensions: 32 x 1 x 1
+ *
+ *  Grid dimensions: input_dims[1] x input_dims[0] x 1
+ */
+template <typename TensorDataType>
+__global__ void send_requests_kernel(
+  Size2 input_dims,
+  const TensorDataType* __restrict__ input,
+  Size2 input_strides,
+  RequestType* __restrict__ requests,
+  Size2 requests_strides,
+  size_t rank,
+  size_t input_rowshift,
+  size_t input_rowstride,
+  size_t embeddings_rowalign,
+  size_t embeddings_rowstride) {
 
-  // Copy input to CPU
-  const CPULocalMat local_input_cpu(local_input);
+  // Indices
+  const size_t bidx = blockIdx.x;
+  const size_t bidy = blockIdx.y;
+  const size_t nblocksx = gridDim.x;
+  const size_t nblocksy = gridDim.y;
+  const bool am_warp_master = threadIdx.x == 0;
 
-  // Populate output matrix with values from embedding matrix
-  LocalMat embeddings_v, output_v;
-  for (size_t j=0; j<local_mini_batch_size; ++j) {
-    for (size_t i=0; i<input_size; ++i) {
-      const auto& ind = static_cast<size_t>(std::floor(local_input_cpu(i,j)));
-      El::View(output_v, local_output,
-               El::IR(i*m_embedding_dim, (i+1)*m_embedding_dim),
-               El::IR(j));
-      El::LockedView(embeddings_v, local_embeddings, El::ALL, El::IR(ind));
-      El::Copy(embeddings_v, output_v);
+  const size_t i_per_block = (input_dims[1] + nblocksx - 1) / nblocksx;
+  const size_t i_start = bidx * i_per_block;
+  const size_t i_end = cuda::min((bidx+1) * i_per_block, input_dims[1]);
+  for (size_t j = bidy; j < input_dims[0]; j += nblocksy) {
+    for (size_t i = i_start; i < i_end; ++i) {
+      const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
+
+      // Get embedding vector index
+      const auto& global_index_float
+        = input[i*input_strides[1] + j*input_strides[0]];
+      const auto& global_index = static_cast<size_t>(cuda::floor(global_index_float));
+
+      // Figure out which process owns embedding vector
+      auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
+      if (am_warp_master) {
+        req.source_rank = distmat_index_owner(global_index, embeddings_rowalign, embeddings_rowstride);
+        req.source_index = distmat_local_index(global_index, req.source_rank, embeddings_rowalign, embeddings_rowstride);
+        req.target_rank = rank;
+        req.target_index = i + global_j*input_dims[1];
+        req.is_active = true;
+      }
+      __syncwarp();
+
+      // Send request to owner process
+      nvshmemx_putmem_nbi_warp(
+        &req,
+        &req,
+        sizeof(RequestType),
+        req.source_rank);
+
     }
   }
 
+}
+#endif // LBANN_HAS_NVSHMEM
+
+#ifdef LBANN_HAS_NVSHMEM
+/** Send my embedding vectors to requesting processes.
+ *
+ *  Block dimensions: 32 x 1 x 1
+ *
+ *  Grid dimensions: num_requests x 1 x 1
+ */
+template <typename TensorDataType>
+__global__ void send_embeddings_kernel(
+  size_t embedding_dim,
+  size_t num_requests,
+  RequestType* __restrict__ requests,
+  const TensorDataType* __restrict__ embeddings,
+  Size2 embeddings_strides,
+  TensorDataType* __restrict__ workspace,
+  Size2 workspace_strides,
+  size_t rank) {
+
+  // Indices
+  const size_t bid = blockIdx.x;
+  const size_t nblocks = gridDim.x;
+  const bool am_warp_master = threadIdx.x == 0;
+
+  // Assign requests to CUDA blocks
+  const size_t requests_per_block = (num_requests + nblocks - 1) / nblocks;
+  const size_t i_start = bid * requests_per_block;
+  const size_t i_end = cuda::min((bid+1) * requests_per_block, num_requests);
+
+  // Send my embedding vectors to requesting processes
+  for (size_t i = i_start; i < i_end; ++i) {
+    const auto& req = requests[i];
+    if (req.is_active && req.source_rank == rank) {
+      auto* workspace_ptr = &workspace[req.target_index * workspace_strides[0]];
+      memcpy_warp(
+        workspace_ptr,
+        &embeddings[req.source_index * embeddings_strides[0]],
+        embedding_dim);
+      if (req.target_rank != rank) {
+        nvshmemx_putmem_nbi_warp(
+          workspace_ptr,
+          workspace_ptr,
+          embedding_dim*sizeof(TensorDataType),
+          req.target_rank);
+      }
+    }
+  }
+
+  // Notify requesting processes that they have recieved my embedding vectors
+  __syncwarp();
+  if (am_warp_master) {
+    nvshmem_fence();
+  }
+  for (size_t i = i_start; i < i_end; ++i) {
+    auto& req = requests[i];
+    if (req.is_active && req.source_rank == rank) {
+      if (am_warp_master) {
+        req.is_completed = 1;
+      }
+      __syncwarp();
+      if (req.target_rank != rank) {
+        nvshmemx_long_put_nbi_warp(
+          &req.is_completed,
+          &req.is_completed,
+          1,
+          req.target_rank);
+      }
+    }
+  }
+
+}
+#endif // LBANN_HAS_NVSHMEM
+
+#ifdef LBANN_HAS_NVSHMEM
+/** Wait for embedding vectors from owner processes.
+ *
+ *  Block dimensions: 32 x 1 x 1
+ *
+ *  Grid dimensions: Max allowed by NVSHMEM
+ */
+template <typename TensorDataType>
+__global__ void wait_for_embeddings_kernel(
+  size_t embedding_dim,
+  Size2 input_dims,
+  RequestType* __restrict__ requests,
+  Size2 requests_strides,
+  const TensorDataType* __restrict__ workspace,
+  Size2 workspace_strides,
+  TensorDataType* __restrict__ output,
+  Size2 output_strides,
+  size_t input_rowshift,
+  size_t input_rowstride) {
+
+  // Indices
+  const size_t bidx = blockIdx.x;
+  const size_t bidy = blockIdx.y;
+  const size_t nblocksx = gridDim.x;
+  const size_t nblocksy = gridDim.y;
+  const bool am_warp_master = threadIdx.x == 0;
+
+  // Assign requests to CUDA blocks
+  const size_t i_per_block = (input_dims[1] + nblocksx - 1) / nblocksx;
+  const size_t i_start = bidx * i_per_block;
+  const size_t i_end = cuda::min((bidx+1) * i_per_block, input_dims[1]);
+
+  for (size_t j = bidy; j < input_dims[0]; j += nblocksy) {
+    for (size_t i = i_start; i < i_end; ++i) {
+      const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
+
+      // Wait for embedding vector to arrive
+      auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
+      if (am_warp_master) {
+        nvshmem_wait(&req.is_completed, 0);
+        req.is_completed = 0;
+      }
+      __syncwarp();
+
+      // Copy embedding vector to output tensor
+      memcpy_warp(
+        &output[i*embedding_dim + j*output_strides[0]],
+        &workspace[req.target_index*workspace_strides[0]],
+        embedding_dim);
+
+    }
+  }
+
+}
+#endif // LBANN_HAS_NVSHMEM
+
+} // namespace <anon>
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
+#ifndef LBANN_HAS_NVSHMEM
+  LBANN_ERROR(
+    "dist_embedding_layer with ",
+    "(TensorDataType=",TypeName<TensorDataType>(),", ",
+    "Layout=",to_string(Layout),", ",
+    "Device=",to_string(Device),") ",
+    "requires NVSHMEM, but LBANN has not been built with NVSHMEM");
+  return;
+#else // LBANN_HAS_NVSHMEM
+
+  // Data matrices
+  using LocalMat = El::Matrix<TensorDataType, Device>;
+  const auto& embeddings = this->get_data_type_weights(0).get_values();
+  const auto& input = this->get_prev_activations();
+  const auto& local_input = dynamic_cast<const LocalMat&>(input.LockedMatrix());
+  auto& local_output = dynamic_cast<LocalMat&>(this->get_local_activations());
+
+  // Dimensions
+  const size_t input_size = this->get_input_size();
+  const size_t output_size = this->get_output_size();
+  const size_t mini_batch_size = input.Width();
+  const size_t local_mini_batch_size = local_input.Width();
+
+  // GPU objects
+  auto&& stream = El::GPUManager::Stream();
+  nvshmem::initialize();
+
+  // SHMEM processing element
+  const size_t rank = this->get_comm()->get_rank_in_trainer();
+
+  // Initialize NVSHMEM buffer for embedding vectors
+  if (m_workspace_buffer_size < output_size * mini_batch_size) {
+    m_workspace_buffer_size = output_size * mini_batch_size;
+    m_workspace_buffer = nvshmem::realloc(m_workspace_buffer,
+                                          m_workspace_buffer_size);
+  }
+  LocalMat workspace(
+    m_embedding_dim,
+    input_size * mini_batch_size,
+    m_workspace_buffer,
+    m_embedding_dim);
+
+  // Initialize NVSHMEM buffer for shmem_put requests
+  if (m_requests_buffer_size < input_size * mini_batch_size) {
+    m_requests_buffer_size = input_size * mini_batch_size;
+    m_requests_buffer = nvshmem::realloc(m_requests_buffer,
+                                         m_requests_buffer_size);
+  }
+  CHECK_CUDA(
+    cudaMemsetAsync(
+      m_requests_buffer,
+      0,
+      m_requests_buffer_size*sizeof(RequestType),
+      stream));
+
+  // Request embedding vectors from owner processes
+  nvshmemx_barrier_all_on_stream(stream);
+  if (!local_input.IsEmpty()) {
+    constexpr size_t block_size = 32;
+    dim3 block_dims, grid_dims;
+    block_dims.x = block_size;
+    grid_dims.x = input_size;
+    grid_dims.y = local_mini_batch_size;
+    launch_cuda_kernel(
+      send_requests_kernel<TensorDataType>,
+      grid_dims,
+      block_dims,
+      0,
+      stream,
+      Size2{local_mini_batch_size, input_size},
+      size_t(local_input.LockedBuffer()),
+      Size2{size_t(local_input.LDim()), 1},
+      m_requests_buffer,
+      Size2{input_size, 1},
+      size_t(rank),
+      size_t(input.RowShift()),
+      size_t(input.RowStride()),
+      size_t(embeddings.RowAlign()),
+      size_t(embeddings.RowStride()));
+  }
+  nvshmemx_barrier_all_on_stream(stream);
+
+  // Send my embedding vectors to requesting processes
+  {
+    constexpr size_t block_size = 32;
+    dim3 block_dims, grid_dims;
+    block_dims.x = block_size;
+    grid_dims.x = input_size * mini_batch_size;
+    launch_cuda_kernel(
+      send_embeddings_kernel<TensorDataType>,
+      grid_dims,
+      block_dims,
+      0,
+      stream,
+      m_embedding_dim,
+      input_size * mini_batch_size,
+      m_requests_buffer,
+      embeddings.LockedBuffer(),
+      Size2{size_t(embeddings.LDim()), 1},
+      workspace.Buffer(),
+      Size2{size_t(workspace.LDim()), 1},
+      rank);
+  }
+  nvshmemx_quiet_on_stream(stream);
+
+  // Copy embedding vectors from workspace to output tensor
+  {
+    constexpr size_t block_size = 32;
+    launch_nvshmem_collective_kernel(
+      wait_for_embeddings_kernel<TensorDataType>,
+      0,
+      block_size,
+      0,
+      stream,
+      m_embedding_dim,
+      Size2{local_mini_batch_size, input_size},
+      m_requests_buffer,
+      Size2{input_size, 1},
+      workspace.LockedBuffer(),
+      Size2{size_t(workspace.LDim()), 1},
+      local_output.Buffer(),
+      Size2{size_t(local_output.LDim()), 1},
+      size_t(input.RowShift()),
+      size_t(input.RowStride()));
+  }
+
+#endif // LBANN_HAS_NVSHMEM
 }
 
 // =============================================
 // Backprop
 // =============================================
 
-template <typename TensorDataType, data_layout Layout, El::Device Device>
-void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
-  using DistMat = El::DistMatrix<TensorDataType,El::STAR,El::STAR,El::ELEMENT,El::Device::GPU>;
-  using LocalMat = El::Matrix<TensorDataType, Device>;
-  using CPULocalMat = El::Matrix<TensorDataType, El::Device::CPU>;
+namespace {
 
-  // Local data
-  auto& embeddings = dynamic_cast<DistMat&>(this->get_data_type_weights(0).get_values());
-  const auto& local_input = dynamic_cast<const LocalMat&>(this->get_local_prev_activations());
-  const auto& local_output_grad = dynamic_cast<const LocalMat&>(this->get_local_prev_error_signals());
-  const size_t input_size = this->get_input_size();
-  const size_t local_mini_batch_size = local_input.Width();
+#ifdef LBANN_HAS_NVSHMEM
+/** Send gradients to owner processes.
+ *
+ *  Block dimensions: 32 x 1 x 1
+ *
+ *  Grid dimensions: input_dims[1] x input_dims[0] x 1
+ */
+template <typename TensorDataType>
+__global__ void send_gradients_kernel(
+  size_t embedding_dim,
+  Size2 input_dims,
+  RequestType* __restrict__ requests,
+  Size2 requests_strides,
+  const TensorDataType* __restrict__ output_grad,
+  Size2 output_grad_strides,
+  TensorDataType* __restrict__ workspace,
+  Size2 workspace_strides,
+  size_t input_rowshift,
+  size_t input_rowstride) {
 
-  // Embedding layer is not differentiable w.r.t. inputs
-  El::Zero(this->get_error_signals());
+  // Indices
+  const size_t bidx = blockIdx.x;
+  const size_t bidy = blockIdx.y;
+  const size_t nblocksx = gridDim.x;
+  const size_t nblocksy = gridDim.y;
+  const bool am_warp_master = threadIdx.x == 0;
 
-  // Copy input to CPU
-  const CPULocalMat local_input_cpu(local_input);
+  // Assign requests to CUDA blocks
+  const size_t i_per_block = (input_dims[1] + nblocksx - 1) / nblocksx;
+  const size_t i_start = bidx * i_per_block;
+  const size_t i_end = cuda::min((bidx+1) * i_per_block, input_dims[1]);
 
-  // Compute gradient w.r.t. embeddings
-  DistMat embeddings_grad(embeddings.Grid());
-  El::Zeros(embeddings_grad, m_embedding_dim, m_num_embeddings);
-  LocalMat& local_embeddings_grad = embeddings_grad.Matrix();
-  LocalMat embeddings_grad_v, output_grad_v;
-  for (size_t j=0; j<local_mini_batch_size; ++j) {
-    for (size_t i=0; i<input_size; ++i) {
-      const auto& ind = static_cast<size_t>(std::floor(local_input_cpu(i,j)));
-      El::LockedView(output_grad_v, local_output_grad,
-                     El::IR(i*m_embedding_dim, (i+1)*m_embedding_dim),
-                     El::IR(j));
-      El::View(embeddings_grad_v, local_embeddings_grad, El::ALL, El::IR(ind));
-      El::Axpy(TensorDataType{1.}, output_grad_v, embeddings_grad_v);
+  // Send gradients to owner processes
+  for (size_t j = bidy; j < input_dims[0]; j += nblocksy) {
+    for (size_t i = i_start; i < i_end; ++i) {
+      const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
+      auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
+      auto* workspace_ptr = &workspace[req.target_index * workspace_strides[0]];
+      memcpy_warp(
+        workspace_ptr,
+        &output_grad[i*embedding_dim + j*output_grad_strides[0]],
+        embedding_dim);
+      if (req.source_rank != req.target_rank) {
+        nvshmemx_putmem_nbi_warp(
+          workspace_ptr,
+          workspace_ptr,
+          embedding_dim*sizeof(TensorDataType),
+          req.source_rank);
+      }
     }
   }
-  El::AllReduce(embeddings_grad, embeddings_grad.RedundantComm());
 
-#ifdef LBANN_DIST_EMBEDDING_SPARSE_SGD
-
-  // Stochastic gradient descent
-  El::Axpy(-m_learning_rate, embeddings_grad, embeddings);
-
-#else // LBANN_DIST_EMBEDDING_SPARSE_SGD
-
-  // Send gradient to optimizer
-  auto& opt = *this->get_data_type_weights(0).get_optimizer();
-  opt.add_to_gradient(embeddings_grad);
-
-#endif // LBANN_DIST_EMBEDDING_SPARSE_SGD
+  // Notify owner processes that they have recieved gradients
+  __syncwarp();
+  if (am_warp_master) {
+    nvshmem_fence();
+  }
+  for (size_t j = bidy; j < input_dims[0]; j += nblocksy) {
+    for (size_t i = i_start; i < i_end; ++i) {
+      const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
+      auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
+      if (am_warp_master) {
+        req.is_completed = 1;
+      }
+      __syncwarp();
+      if (req.source_rank != req.target_rank) {
+        nvshmemx_long_put_nbi_warp(
+          &req.is_completed,
+          &req.is_completed,
+          1,
+          req.source_rank);
+      }
+    }
+  }
 
 }
+#endif // LBANN_HAS_NVSHMEM
 
-// =============================================
-// Builder function
-// =============================================
+#ifdef LBANN_HAS_NVSHMEM
+/** Sparse SGD on local embeddings.
+ *
+ *  Block dimensions: 32 x 1 x 1
+ *
+ *  Grid dimensions: Max allowed by NVSHMEM
+ */
+template <typename TensorDataType>
+__global__ void sgd_kernel(
+  TensorDataType learning_rate,
+  size_t embedding_dim,
+  size_t num_requests,
+  RequestType* __restrict__ requests,
+  const TensorDataType* __restrict__ workspace,
+  Size2 workspace_strides,
+  TensorDataType* __restrict__ embeddings,
+  Size2 embeddings_strides,
+  size_t rank) {
+
+  // Indices
+  const size_t tid = threadIdx.x;
+  const size_t bid = blockIdx.x;
+  const size_t nblocks = gridDim.x;
+  constexpr size_t warp_size = 32;
+  const bool am_warp_master = threadIdx.x == 0;
+
+  // Assign requests to CUDA blocks
+  const size_t requests_per_block = (num_requests + nblocks - 1) / nblocks;
+  const size_t i_start = bid * requests_per_block;
+  const size_t i_end = cuda::min((bid+1) * requests_per_block, num_requests);
+
+  for (size_t i = i_start; i < i_end; ++i) {
+    auto& req = requests[i];
+    if (req.is_active && req.source_rank == rank) {
+
+      // Wait for gradient to arrive
+      if (am_warp_master) {
+        nvshmem_wait(&req.is_completed, 0);
+        req.is_completed = 0;
+      }
+      __syncwarp();
+
+      // Update embedding vector with gradient
+      const auto* __restrict__ dw = &workspace[req.target_index * workspace_strides[0]];
+      auto* __restrict__ w = &embeddings[req.source_index * embeddings_strides[0]];
+      for (size_t k = tid; k < embedding_dim; k += warp_size) {
+        cuda::atomic_add(&w[k], -learning_rate * dw[k]);
+      }
+
+    }
+  }
+
+}
+#endif // LBANN_HAS_NVSHMEM
+
+} // namespace <anon>
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
-std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf(
-  lbann_comm* comm,
-  const lbann_data::Layer& proto_layer) {
+void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
+#ifndef LBANN_HAS_NVSHMEM
   LBANN_ERROR(
-    "Attempted to construct dist_embedding_layer ",
-    "with invalid parameters ",
+    "dist_embedding_layer with ",
     "(TensorDataType=",TypeName<TensorDataType>(),", ",
     "Layout=",to_string(Layout),", ",
-    "Device=",to_string(Device),")");
-  return nullptr;
-}
+    "Device=",to_string(Device),") ",
+    "requires NVSHMEM, but LBANN has not been built with NVSHMEM");
+  return;
+#else // LBANN_HAS_NVSHMEM
 
-/// @todo Restore
-#if 0
-template <>
-std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf<float,data_layout::DATA_PARALLEL,El::Device::GPU>(
-  lbann_comm* comm,
-  const lbann_data::Layer& proto_layer) {
-  const auto& params = proto_layer.dist_embedding();
-  return make_unique<dist_embedding_layer<float,data_layout::DATA_PARALLEL,El::Device::GPU>>(
-    comm,
-    params.num_embeddings(),
-    params.embedding_dim(),
-    params.learning_rate());
+  // Data matrices
+  using LocalMat = El::Matrix<TensorDataType, Device>;
+  auto& embeddings = this->get_data_type_weights(0).get_values();
+  auto& local_embeddings = dynamic_cast<LocalMat&>(embeddings.Matrix());
+  const auto& input = this->get_prev_activations();
+  const auto& local_output_grad = dynamic_cast<const LocalMat&>(this->get_local_prev_error_signals());
+
+  // Dimensions
+  const size_t input_size = this->get_input_size();
+  const size_t mini_batch_size = input.Width();
+  const size_t local_mini_batch_size = local_output_grad.Width();
+
+  // GPU objects
+  auto&& stream = El::GPUManager::Stream();
+
+  // SHMEM processing element
+  const size_t rank = this->get_comm()->get_rank_in_trainer();
+
+  // Initialize NVSHMEM buffer for gradient w.r.t. embeddings
+  LocalMat workspace(
+    m_embedding_dim,
+    input_size * mini_batch_size,
+    m_workspace_buffer,
+    m_embedding_dim);
+
+  // Send gradients to owner processes
+  if (!local_output_grad.IsEmpty()) {
+    constexpr size_t block_size = 32;
+    dim3 block_dims, grid_dims;
+    block_dims.x = block_size;
+    grid_dims.x = input_size;
+    grid_dims.y = local_mini_batch_size;
+    launch_cuda_kernel(
+      send_gradients_kernel<TensorDataType>,
+      grid_dims,
+      block_dims,
+      0,
+      stream,
+      m_embedding_dim,
+      Size2{local_mini_batch_size, input_size},
+      m_requests_buffer,
+      Size2{input_size, 1},
+      local_output_grad.LockedBuffer(),
+      Size2{size_t(local_output_grad.LDim()), 1},
+      workspace.Buffer(),
+      Size2{size_t(workspace.LDim()), 1},
+      size_t(input.RowShift()),
+      size_t(input.RowStride()));
+  }
+  nvshmemx_quiet_on_stream(stream);
+
+  // Configure local embeddings for sparse SGD
+  // Note: If we are not doing sparse SGD, then we initialize
+  // embeddings_v as a tensor of zeros. Applying sparse SGD to this
+  // tensor results in the full gradient tensor, which can then be
+  // sent to a dense optimizer.
+  LocalMat local_embeddings_v;
+  std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> embeddings_grad;
+  if (m_sparse_sgd) {
+    El::View(local_embeddings_v, local_embeddings);
+  }
+  else {
+    embeddings_grad.reset(
+      embeddings.Construct(embeddings.Grid(), embeddings.Root()));
+    embeddings_grad->AlignWith(embeddings);
+    El::Zeros(*embeddings_grad, embeddings.Height(), embeddings.Width());
+    El::View(local_embeddings_v, embeddings_grad->Matrix());
+  }
+
+  // Sparse SGD on local embeddings
+  {
+    constexpr size_t block_size = 32;
+    launch_nvshmem_collective_kernel(
+      sgd_kernel<TensorDataType>,
+      0,
+      block_size,
+      0,
+      stream,
+      m_learning_rate,
+      m_embedding_dim,
+      input_size * mini_batch_size,
+      m_requests_buffer,
+      workspace.LockedBuffer(),
+      Size2{size_t(workspace.LDim()), 1},
+      local_embeddings_v.Buffer(),
+      Size2{size_t(local_embeddings_v.LDim()), 1},
+      rank);
+  }
+
+  // Send gradients to dense optimizer if needed
+  auto&& opt = this->get_data_type_weights(0).get_optimizer();
+  if (!m_sparse_sgd && opt != nullptr) {
+    opt->add_to_gradient(*embeddings_grad);
+  }
+
+#endif // LBANN_HAS_NVSHMEM
 }
-#endif // 0
 
 // =============================================
 // Explicit template instantiation
 // =============================================
 
-/// @todo Implement on GPU with nvshmem
 /// @todo fp16
-// template class dist_embedding_layer<
-//   float, data_layout::DATA_PARALLEL, El::Device::GPU>;
-
-#define PROTO(T)                                                        \
-  template std::unique_ptr<Layer>                                       \
-  build_dist_embedding_layer_from_pbuf<T,data_layout::DATA_PARALLEL,El::Device::GPU>( \
-    lbann_comm*, lbann_data::Layer const&);                             \
-  template std::unique_ptr<Layer>                                       \
-  build_dist_embedding_layer_from_pbuf<T,data_layout::MODEL_PARALLEL,El::Device::GPU>( \
-    lbann_comm*, lbann_data::Layer const&)
-#define LBANN_INSTANTIATE_CPU_HALF
-#define LBANN_INSTANTIATE_GPU_HALF
-#include "lbann/macros/instantiate.hpp"
+template class dist_embedding_layer<
+  float, data_layout::DATA_PARALLEL, El::Device::GPU>;
 
 } // namespace lbann

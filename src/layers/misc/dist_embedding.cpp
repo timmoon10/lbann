@@ -92,7 +92,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
     m_workspace_buffer = reinterpret_cast<TensorDataType*>(
       shmem_realloc(
         m_workspace_buffer,
-        m_workspace_buffer_size*sizeof(shmem_put_request)
+        m_workspace_buffer_size*sizeof(RequestType)
         )
       );
   }
@@ -105,16 +105,16 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   // Initialize SHMEM buffer for shmem_put requests
   if (m_requests_buffer_size < input_size * mini_batch_size) {
     m_requests_buffer_size = input_size * mini_batch_size;
-    m_requests_buffer = reinterpret_cast<shmem_put_request*>(
+    m_requests_buffer = reinterpret_cast<RequestType*>(
       shmem_realloc(
         m_requests_buffer,
-        m_requests_buffer_size*sizeof(shmem_put_request))
+        m_requests_buffer_size*sizeof(RequestType))
       );
   }
   std::fill(
     m_requests_buffer,
     m_requests_buffer+m_requests_buffer_size,
-    shmem_put_request());
+    RequestType());
 
   // Request embedding vectors from owner processes
   shmem_barrier_all();
@@ -132,10 +132,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
       req.is_active = true;
 
       // Send request to owner process
-      shmem_putmem(
+      shmem_putmem_nbi(
         &req,
         &req,
-        sizeof(shmem_put_request),
+        sizeof(RequestType),
         req.source_rank);
 
     }
@@ -146,7 +146,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   for (size_t i=0; i<input_size*mini_batch_size; ++i) {
     const auto& req = m_requests_buffer[i];
     if (req.is_active && req.source_rank == rank) {
-      shmem_putmem(
+      shmem_putmem_nbi(
         workspace.Buffer(0, req.target_index),
         embeddings.LockedBuffer(0, req.source_index),
         m_embedding_dim*sizeof(TensorDataType),
@@ -162,7 +162,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   for (size_t i=0; i<input_size*mini_batch_size; ++i) {
     auto& req = m_requests_buffer[i];
     if (req.is_active && req.source_rank == rank) {
-      shmem_long_put(
+      shmem_long_put_nbi(
         &req.is_completed,
         &flag_val,
         1,
@@ -230,7 +230,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_j = input.GlobalCol(j);
       const auto& req = m_requests_buffer[i + global_j*input_size];
-      shmem_putmem(
+      shmem_putmem_nbi(
         workspace.Buffer(0, i+global_j*input_size),
         local_output_grad.LockedBuffer(i*m_embedding_dim, j),
         m_embedding_dim*sizeof(TensorDataType),
@@ -247,7 +247,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_j = input.GlobalCol(j);
       auto& req = m_requests_buffer[i + global_j*input_size];
-      shmem_long_put(
+      shmem_long_put_nbi(
         &req.is_completed,
         &flag_val,
         1,
@@ -278,6 +278,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   const size_t num_omp_threads = omp_get_num_threads();
   const size_t embeddings_per_thread
     = (local_embeddings.Width() + num_omp_threads - 1) / num_omp_threads;
+  LBANN_OMP_PARALLEL_FOR
   for (size_t thread = 0; thread < num_omp_threads; ++thread) {
     const size_t index_start = thread * embeddings_per_thread;
     const size_t index_end = (thread+1) * embeddings_per_thread;
@@ -317,25 +318,51 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
 // Builder function
 // =============================================
 
+namespace
+{
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+struct Builder
+{
+
+  template <typename... Args>
+  static std::unique_ptr<Layer> Build(Args&&...)
+  {
+    LBANN_ERROR(
+      "Attempted to construct dist_embedding_layer ",
+      "with invalid parameters ",
+      "(TensorDataType=",TypeName<TensorDataType>(),", ",
+      "Layout=",to_string(Layout),", ",
+      "Device=",to_string(Device),")");
+    return nullptr;
+  }
+
+};
+
+template <El::Device Device>
+struct Builder<float,data_layout::DATA_PARALLEL,Device>
+{
+
+  template <typename... Args>
+  static std::unique_ptr<Layer> Build(Args&&... args)
+  {
+    using LayerType = dist_embedding_layer<float,data_layout::DATA_PARALLEL,Device>;
+    return make_unique<LayerType>(std::forward<Args>(args)...);
+  }
+
+};
+
+} // namespace <anon>
+
 template <typename TensorDataType, data_layout Layout, El::Device Device>
 std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf(
   lbann_comm* comm,
-  const lbann_data::Layer& proto_layer) {
-  LBANN_ERROR(
-    "Attempted to construct dist_embedding_layer ",
-    "with invalid parameters ",
-    "(TensorDataType=",TypeName<TensorDataType>(),", ",
-    "Layout=",to_string(Layout),", ",
-    "Device=",to_string(Device),")");
-  return nullptr;
-}
-
-template <>
-std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf<float,data_layout::DATA_PARALLEL,El::Device::CPU>(
-  lbann_comm* comm,
-  const lbann_data::Layer& proto_layer) {
+  const lbann_data::Layer& proto_layer)
+{
+  using BuilderType = Builder<TensorDataType, Layout, Device>;
+  LBANN_ASSERT_MSG_HAS_FIELD(proto_layer, dist_embedding);
   const auto& params = proto_layer.dist_embedding();
-  return make_unique<dist_embedding_layer<float,data_layout::DATA_PARALLEL,El::Device::CPU>>(
+  return BuilderType::Build(
     comm,
     params.num_embeddings(),
     params.embedding_dim(),
@@ -350,16 +377,11 @@ std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf<float,data_layout::D
 /// @todo fp16
 template class dist_embedding_layer<
   float, data_layout::DATA_PARALLEL, El::Device::CPU>;
+extern template class dist_embedding_layer<
+  float, data_layout::DATA_PARALLEL, El::Device::GPU>;
 
-#define PROTO(T)                                                        \
-  template std::unique_ptr<Layer>                                       \
-  build_dist_embedding_layer_from_pbuf<T,data_layout::DATA_PARALLEL,El::Device::CPU>( \
-    lbann_comm*, lbann_data::Layer const&);                             \
-  template std::unique_ptr<Layer>                                       \
-  build_dist_embedding_layer_from_pbuf<T,data_layout::MODEL_PARALLEL,El::Device::CPU>( \
-    lbann_comm*, lbann_data::Layer const&)
-#define LBANN_INSTANTIATE_CPU_HALF
-#define LBANN_INSTANTIATE_GPU_HALF
-#include "lbann/macros/instantiate.hpp"
+#define PROTO_DEVICE(T, Device)                         \
+  LBANN_LAYER_BUILDER_ETI(dist_embedding, T, Device)
+#include "lbann/macros/instantiate_device.hpp"
 
 } // namespace lbann
