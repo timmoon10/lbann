@@ -76,8 +76,7 @@ USE_NINJA=0
 # by enabling LIBJPEG_TURBO_DIR
 WITH_LIBJPEG_TURBO=ON
 #LIBJPEG_TURBO_DIR="/p/lscratchh/brainusr/libjpeg-turbo-1.5.2"
-#WITH_NVSHMEM=0
-WITH_NVSHMEM=1 ### @todo Remove
+WITH_NVSHMEM=0
 NVSHMEM_DIR=
 
 function version_gt() { test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"; }
