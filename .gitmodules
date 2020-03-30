@@ -7,7 +7,7 @@
 	url = https://lc.llnl.gov/bitbucket/scm/havoq/largescale_node2vec.git
 	ignore = dirty
 [submodule "applications/graph/havoqgt"]
-	path = applications/graph/havoqgt
+	path = applications/KIwabuchi/havoqgt
 	url = https://github.com/LLNL/havoqgt.git
-	branch = develop_keita_node2vec
+	branch = develop
 	ignore = dirty
