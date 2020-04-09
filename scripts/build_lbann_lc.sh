@@ -5,6 +5,7 @@ CLUSTER=$(hostname | sed 's/\([a-zA-Z][a-zA-Z]*\)[0-9]*/\1/g')
 TOSS=$(uname -r | sed 's/\([0-9][0-9]*\.*\)\-.*/\1/g')
 ARCH=$(uname -m)
 CORAL=$([[ $(hostname) =~ (sierra|lassen|ray) ]] && echo 1 || echo 0)
+ROOT_DIR=$(realpath $(dirname $0)/..)
 
 ################################################################
 # Default options
@@ -485,6 +486,12 @@ if [ ${WITH_NVSHMEM} -ne 0 ]; then
     fi
 fi
 
+# Hacks to build with largescale_node2vec and HavoqGT
+#WITH_LARGESCALE_NODE2VEC=0
+WITH_LARGESCALE_NODE2VEC=1
+CXX_FLAGS="${CXX_FLAGS} -isystem ${ROOT_DIR}/applications/graph/largescale_node2vec/include -isystem ${ROOT_DIR}/applications/graph/havoqgt/include"
+C_FLAGS="${CXX_FLAGS}"
+
 # Set environment variables
 CC=${C_COMPILER}
 CXX=${CXX_COMPILER}
@@ -493,9 +500,6 @@ CXX=${CXX_COMPILER}
 ################################################################
 # Initialize directories
 ################################################################
-
-# Get LBANN root directory
-ROOT_DIR=$(realpath $(dirname $0)/..)
 
 # Initialize build directory
 if [ -z "${BUILD_DIR}" ]; then
@@ -848,6 +852,10 @@ cmake \
 -D DIHYDROGEN_ENABLE_DISTCONV_LEGACY=${WITH_DISTCONV} \
 -D LBANN_WITH_DIHYDROGEN=${WITH_DIHYDROGEN} \
 -D LBANN_WITH_DISTCONV=${WITH_DISTCONV} \
+-D CMAKE_CXX_STANDARD=17 \
+-D LBANN_SB_FWD_LBANN_CMAKE_CXX_STANDARD=17 \
+-D LBANN_SB_FWD_LBANN_CMAKE_CUDA_STANDARD=14 \
+-D LBANN_HAS_LARGESCALE_NODE2VEC=${WITH_LARGESCALE_NODE2VEC} \
 ${SUPERBUILD_DIR}
 EOF
 )
