@@ -52,7 +52,8 @@ public:
     std::string backup_file,
     size_t walk_length,
     double return_param,
-    double inout_param);
+    double inout_param,
+    size_t num_negative_samples);
   node2vec_reader(const node2vec_reader&) = delete;
   node2vec_reader& operator=(const node2vec_reader&) = delete;
   ~node2vec_reader() override;
@@ -69,7 +70,11 @@ public:
   void load() override;
 
 protected:
-  bool fetch_datum(CPUMat& X, int data_id, int mb_idx) override;
+  bool fetch_data_block(
+    CPUMat& X,
+    El::Int thread_id,
+    El::Int mb_size,
+    El::Matrix<El::Int>& indices_fetched) override;
   bool fetch_label(CPUMat& Y, int data_id, int mb_idx) override;
 
 private:
@@ -85,6 +90,7 @@ private:
   double m_return_param;
   /** @brief node2vec q parameter. */
   double m_inout_param;
+  size_t m_num_negative_samples;
 
 };
 

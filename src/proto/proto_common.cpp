@@ -313,7 +313,8 @@ void init_data_readers(
         params.backup_file(),
         params.walk_length(),
         params.return_param(),
-        params.inout_param());
+        params.inout_param(),
+        params.num_negative_samples());
 #else
       LBANN_ERROR("attempted to construct node2vec data reader, "
                   "but LBANN is not built with "

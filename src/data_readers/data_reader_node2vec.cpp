@@ -29,6 +29,7 @@
 #include "lbann/utils/memory.hpp"
 #include <dist/node2vec_rw/node2vec_rw.hpp>
 #include <havoqgt/distributed_db.hpp>
+#include <havoqgt/delegate_partitioned_graph.hpp>
 
 namespace lbann {
 
@@ -62,6 +63,7 @@ namespace {
   using node2vec_reader_impl::RandomWalker;
   using node2vec_reader_impl::EdgeWeightData;
   using Graph = RandomWalker::graph_type;
+  using Vertex = RandomWalker::vertex_type;
 } // namespace <anon>
 
 node2vec_reader::node2vec_reader(
@@ -69,13 +71,15 @@ node2vec_reader::node2vec_reader(
   std::string backup_file,
   size_t walk_length,
   double return_param,
-  double inout_param)
+  double inout_param,
+  size_t num_negative_samples)
   : generic_data_reader(true),
     m_graph_file(std::move(graph_file)),
     m_backup_file(std::move(backup_file)),
     m_walk_length{walk_length},
     m_return_param{return_param},
-    m_inout_param{inout_param}
+    m_inout_param{inout_param},
+    m_num_negative_samples{num_negative_samples}
 {}
 
 node2vec_reader::~node2vec_reader() {
@@ -95,8 +99,8 @@ std::string node2vec_reader::get_type() const {
 
 const std::vector<int> node2vec_reader::get_data_dims() const {
   std::vector<int> dims;
-  /// @todo Include random samples and walk windows
-  dims.push_back(static_cast<int>(m_walk_length));
+  /// @todo Use walk windows
+  dims.push_back(static_cast<int>(m_walk_length + m_num_negative_samples));
   return dims;
 }
 int node2vec_reader::get_num_labels() const {
@@ -111,8 +115,40 @@ int node2vec_reader::get_linearized_label_size() const {
   return get_num_labels();
 }
 
-bool node2vec_reader::fetch_datum(CPUMat& Y, int data_id, int col) {
+bool node2vec_reader::fetch_data_block(
+  CPUMat& X,
+  El::Int thread_id,
+  El::Int mb_size,
+  El::Matrix<El::Int>& indices_fetched) {
+
+  // Get HavoqGT graph
+  const auto& graph = *m_distributed_database->get_segment_manager()->find<Graph>("graph_obj").first;
+
+  // Get starting vertices for random walks
+  std::vector<Vertex> start_vertices;
+  start_vertices.reserve(mb_size);
+  for (El::Int i=0; i<mb_size; ++i) {
+    const auto& sample_index
+      = m_shuffled_indices[m_current_pos+i*m_sample_stride];
+    start_vertices.push_back(graph.label_to_locator(sample_index));
+    indices_fetched.Set(i, 0, sample_index);
+  }
+
+  // Perform random walks
+  const auto walks = m_random_walker->run_walker(start_vertices);
+
+  // Generate negative samples
   /// @todo Implement
+
+  // Populate output tensor
+  const El::Int walk_length_(m_walk_length);
+  for (El::Int j=0; j<mb_size; ++j) {
+    for (El::Int i=0; i<walk_length_; ++i) {
+      const auto vertex = graph.locator_to_label(walks[j][i]);
+      X(i,j) = static_cast<float>(vertex);
+    }
+  }
+
   return true;
 }
 
