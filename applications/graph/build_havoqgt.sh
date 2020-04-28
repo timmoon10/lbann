@@ -14,6 +14,11 @@ else
     module load mvapich2
 fi
 
+# Compilers
+cxx_compiler=$(which g++)
+cxx_flags="-std=c++17 -fopenmp -lrt -lstdc++fs -lpthread"
+mpi_cxx_compiler=$(which mpicxx)
+
 # Source directories
 pushd $(dirname $(realpath $0)) > /dev/null
 lbann_dir=$(git rev-parse --show-toplevel)
@@ -24,42 +29,59 @@ havoqgt_dir=${app_dir}/havoqgt
 boost_dir=/usr/tcetmp/packages/boost/boost-1.70.0
 
 # Create clean build directory and move there
-build_dir=${node2vec_dir}/build/${system}.llnl.gov
+build_dir=${app_dir}/build
 rm -rf ${build_dir}
 mkdir -p ${build_dir}
 pushd ${build_dir} > /dev/null
 
-# Configure build with CMake
+# Build HavoqGT
+mkdir havoqgt
+pushd havoqgt > /dev/null
 configure_command=$(cat << EOF
 cmake \
 --verbose=1 \
 -DCMAKE_BUILD_TYPE=Release \
--DCMAKE_C_COMPILER=$(which gcc) \
--DCMAKE_CXX_COMPILER=$(which g++) \
+-DCMAKE_CXX_COMPILER=${cxx_compiler} \
+-DCMAKE_CXX_FLAGS="${cxx_flags}" \
+-DMPI_CXX_COMPILER=${mpi_cxx_compiler} \
+-DBOOST_ROOT=${boost_dir} \
+${havoqgt_dir}
+EOF
+)
+echo "${configure_command}"
+eval ${configure_command}
+build_command=$(cat << EOF
+make -j$(nproc) ingest_edge_list
+EOF
+)
+echo "${build_command}"
+eval ${build_command}
+popd > /dev/null
+
+# Build largescale_node2vec
+mkdir largescale_nodevec
+pushd largescale_nodevec > /dev/null
+configure_command=$(cat << EOF
+cmake \
+--verbose=1 \
+-DCMAKE_BUILD_TYPE=Release \
+-DCMAKE_CXX_COMPILER=${cxx_compiler} \
+-DCMAKE_CXX_FLAGS="${cxx_flags}" \
+-DMPI_CXX_COMPILER=${mpi_cxx_compiler} \
 -DBOOST_ROOT=${boost_dir} \
 -DHAVOQGT_ROOT=${havoqgt_dir} \
--DMPI_C_COMPILER=$(which mpicc) \
--DMPI_CXX_COMPILER=$(which mpicxx) \
 ${node2vec_dir}
 EOF
 )
-#-DMPI_HOME=$(dirname $(dirname $(which mpicxx))) \
-#-DCMAKE_CXX_FLAGS="-std=c++17 -fopenmp -lrt -lstdc++fs -lpthread" \
-
-#-DMPI_HOME=$(dirname $(dirname $(which mpicxx))) \
-# -DMPI_ROOT=$(dirname $(dirname $(which mpicxx))) \
-# -DMPI_C_COMPILER=$(which mpicc) \
-
 echo "${configure_command}"
 eval ${configure_command}
-
-# Build with make
 build_command=$(cat << EOF
 make -j$(nproc) run_dist_node2vec_rw
 EOF
 )
 echo "${build_command}"
 eval ${build_command}
+popd > /dev/null
 
 # Return to original directory
 dirs -c

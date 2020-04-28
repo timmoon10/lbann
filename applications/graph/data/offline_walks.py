@@ -1,13 +1,19 @@
-"""Random walk dataset.
+"""Dataset for offline random walks.
 
-This is intended to be imported by the Python data reader and used to
-obtain data samples.
+This script loads random walks that have been generated offline. It is
+intended to be imported by the Python data reader and used in a
+Skip-Gram algorithm. Data samples consists of a random walk and
+negative samples.
 
 """
 import os.path
+import sys
 import numpy as np
+
+# Local imports
+root_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.append(root_dir)
 import utils.snap
-root_dir = os.path.dirname(os.path.realpath(__file__))
 
 # Graph options
 graph_name = 'blog'
@@ -15,7 +21,7 @@ graph_file = os.path.join(
     root_dir, 'largescale_node2vec', 'evaluation', 'dataset',
     'blog', 'edges_0based'
 )
-# graph_file = os.path.join(root_dir, 'data', graph_name, 'graph.txt')
+# graph_file = os.path.join(root_dir, 'data', 'graphs', graph_name, 'graph.txt')
 directed = False
 weighted = False
 
@@ -32,7 +38,7 @@ noise_distribution_exp = 0.75   # Exponent to convert unigram
                                 # distribution to noise distribution
 
 # Download graph and perform random walk, if needed
-data_dir = os.path.join(root_dir, 'data', graph_name)
+data_dir = os.path.join(root_dir, 'data', 'graphs', graph_name)
 walk_file = os.path.join(data_dir, 'walk.txt')
 if not os.path.isfile(graph_file):
     utils.snap.download_graph(graph_name, graph_file)

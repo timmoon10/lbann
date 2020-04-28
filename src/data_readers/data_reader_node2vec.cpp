@@ -120,6 +120,7 @@ bool node2vec_reader::fetch_data_block(
   El::Int thread_id,
   El::Int mb_size,
   El::Matrix<El::Int>& indices_fetched) {
+  if (thread_id != 0) { return true; }
 
   // Get HavoqGT graph
   const auto& graph = *m_distributed_database->get_segment_manager()->find<Graph>("graph_obj").first;
@@ -141,11 +142,11 @@ bool node2vec_reader::fetch_data_block(
   /// @todo Implement
 
   // Populate output tensor
-  const El::Int walk_length_(m_walk_length);
-  for (El::Int j=0; j<mb_size; ++j) {
-    for (El::Int i=0; i<walk_length_; ++i) {
+  const size_t mb_size_ = mb_size;
+  for (size_t j=0; j<mb_size_; ++j) {
+    for (size_t i=0; i<m_walk_length; ++i) {
       const auto vertex = graph.locator_to_label(walks[j][i]);
-      X(i,j) = static_cast<float>(vertex);
+      X(i+m_num_negative_samples,j) = static_cast<float>(vertex);
     }
   }
 
@@ -156,9 +157,7 @@ bool node2vec_reader::fetch_label(CPUMat& Y, int data_id, int col) {
   return true;
 }
 
-void node2vec_reader::setup(int num_io_threads,
-                            observer_ptr<thread_pool> io_thread_pool) {
-  generic_data_reader::setup(num_io_threads, io_thread_pool);
+void node2vec_reader::load() {
 
   // Copy backup file if needed
   if (!m_backup_file.empty()) {
@@ -171,13 +170,13 @@ void node2vec_reader::setup(int num_io_threads,
   m_distributed_database = make_unique<DistributedDatabase>(
     ::havoqgt::db_open(),
     m_graph_file.c_str());
-  auto* graph = m_distributed_database->get_segment_manager()->find<Graph>("graph_obj").first;
+  auto& graph = *m_distributed_database->get_segment_manager()->find<Graph>("graph_obj").first;
 
   // Load edge data
   m_edge_weight_data.reset();
   auto* edge_weight_data = m_distributed_database->get_segment_manager()->find<EdgeWeightData>("graph_edge_weight_data_obj").first;
   if (edge_weight_data == nullptr) {
-    m_edge_weight_data = make_unique<EdgeWeightData>(*graph);
+    m_edge_weight_data = make_unique<EdgeWeightData>(graph);
     m_edge_weight_data->reset(1.0);
     edge_weight_data = m_edge_weight_data.get();
   }
@@ -187,7 +186,7 @@ void node2vec_reader::setup(int num_io_threads,
   bool small_edge_weight_variance = false;
   MPI_Comm comm = MPI_COMM_WORLD; /// @todo Use lbann_comm
   m_random_walker = make_unique<RandomWalker>(
-    *graph,
+    graph,
     *edge_weight_data,
     small_edge_weight_variance,
     m_walk_length,
@@ -196,19 +195,12 @@ void node2vec_reader::setup(int num_io_threads,
     comm);
   MPI_Barrier(MPI_COMM_WORLD); /// @todo Use lbann_comm
 
-}
-
-void node2vec_reader::load() {
-  if (m_distributed_database == nullptr) {
-    LBANN_ERROR(
-      "\"",this->get_type(),"\" data reader ",
-      "attempted to load data before setup");
-  }
-  auto& graph = *m_distributed_database->get_segment_manager()->find<Graph>("graph_obj").first;
-  m_shuffled_indices.resize(graph.max_global_vertex_id());
+  // Construct list of indices
+  m_shuffled_indices.resize(graph.max_global_vertex_id()+1);
   std::iota(m_shuffled_indices.begin(), m_shuffled_indices.end(), 0);
   resize_shuffled_indices();
   select_subset_of_data();
+
 }
 
 } // namespace lbann

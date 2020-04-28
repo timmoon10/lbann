@@ -6,8 +6,8 @@ import lbann
 import lbann.contrib.launcher
 import lbann.contrib.args
 
-import dataset
-from utils import make_iterable, str_list
+import data.data_readers
+import utils
 import utils.snap
 
 # ----------------------------------
@@ -35,12 +35,44 @@ parser.add_argument(
 parser.add_argument(
     '--work-dir', action='store', default=None, type=str,
     help='working directory', metavar='DIR')
+parser.add_argument(
+    '--offline-walks', action='store_true',
+    help='perform random walks offline')
 args = parser.parse_args()
 
 # Default learning rate
 # Note: Learning rate in original word2vec is 0.025
 if args.learning_rate < 0:
     args.learning_rate = 0.025 * args.mini_batch_size
+
+# ----------------------------------
+# Create data reader
+# ----------------------------------
+
+# Properties for graph and random walk
+# Note: Use parameters from offline walk script
+import data.offline_walks
+graph_file = data.offline_walks.graph_file
+num_graph_nodes = data.offline_walks.max_graph_node_id() + 1
+walk_length = data.offline_walks.walk_context_length
+return_param = data.offline_walks.return_param
+inout_param = data.offline_walks.inout_param
+num_negative_samples = data.offline_walks.num_negative_samples
+
+# Construct data reader
+if args.offline_walks:
+    reader = data.data_readers.make_offline_data_reader()
+else:
+    # Note: Before starting LBANN, we preprocess graph by ingesting
+    # with HavoqGT and writing distributed graph to shared memory.
+    distributed_graph_file = '/dev/shm/graph'
+    reader = data.data_readers.make_online_data_reader(
+        graph_file=distributed_graph_file,
+        walk_length=walk_length,
+        return_param=return_param,
+        inout_param=inout_param,
+        num_negative_samples=num_negative_samples,
+    )
 
 # ----------------------------------
 # Embedding weights
@@ -61,18 +93,12 @@ decoder_embeddings_weights = lbann.Weights(
 # Construct layer graph
 # ----------------------------------
 
-# Properties of graph and random walk
-num_graph_nodes = dataset.max_graph_node_id() + 1
-walk_length = dataset.walk_context_length
-num_negative_samples = dataset.num_negative_samples
-input_size = dataset.sample_dims()[0]
-
 # Embedding vectors, including negative sampling
 # Note: Input is sequence of graph node IDs
 input_ = lbann.Identity(lbann.Input())
 input_slice = lbann.Slice(
     input_,
-    slice_points=f'0 {num_negative_samples+1} {input_size}'
+    slice_points=f'0 {num_negative_samples+1} {num_negative_samples+walk_length}'
 )
 decoder_embeddings = lbann.DistEmbedding(
     input_slice,
@@ -109,26 +135,6 @@ obj = [
     lbann.LayerTerm(obj_negative, scale=-1/num_negative_samples),
 ]
 
-# # Perform all computation on CPU
-# for l in lbann.traverse_layer_graph(input_):
-#     l.device = 'cpu'
-
-# ----------------------------------
-# Create data reader
-# ----------------------------------
-
-reader = lbann.reader_pb2.DataReader()
-_reader = reader.reader.add()
-_reader.name = 'python'
-_reader.role = 'train'
-_reader.percent_of_data_to_use = 1.0
-#_reader.percent_of_data_to_use = 0.0179023 ### @todo Remove
-_reader.python.module = 'dataset'
-_reader.python.module_dir = os.path.dirname(os.path.realpath(__file__))
-_reader.python.sample_function = 'get_sample'
-_reader.python.num_samples_function = 'num_samples'
-_reader.python.sample_dims_function = 'sample_dims'
-
 # ----------------------------------
 # Run LBANN
 # ----------------------------------
@@ -137,7 +143,7 @@ _reader.python.sample_dims_function = 'sample_dims'
 opt = lbann.SGD(learn_rate=args.learning_rate)
 
 # Create LBANN objects
-trainer = lbann.Trainer()
+trainer = lbann.Trainer(num_parallel_readers=0)
 callbacks = [
     lbann.CallbackPrint(),
     lbann.CallbackTimer(),
@@ -151,10 +157,45 @@ model = lbann.Model(args.mini_batch_size,
                     objective_function=obj,
                     callbacks=callbacks)
 
-# Run LBANN
+# Create batch script
 kwargs = lbann.contrib.args.get_scheduler_kwargs(args)
-lbann.contrib.launcher.run(trainer, model, reader, opt,
-                           job_name=args.job_name,
-                           work_dir=args.work_dir,
-                           overwrite_script=True,
-                           **kwargs)
+kwargs['procs_per_node'] = 1 ### @todo Remove
+script = lbann.contrib.launcher.make_batch_script(
+    job_name=args.job_name,
+    work_dir=args.work_dir,
+    **kwargs,
+)
+
+# Preprocess graph data with HavoqGT if needed
+if not args.offline_walks:
+    ingest_graph_exe = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        'build',
+        'havoqgt',
+        'src',
+        'ingest_edge_list',
+    )
+    script.add_parallel_command([
+        ingest_graph_exe,
+        f'-o {distributed_graph_file}',
+        f'-d {2**30}',
+        graph_file,
+    ])
+
+# LBANN invocation
+prototext_file = os.path.join(script.work_dir, 'experiment.prototext')
+lbann.proto.save_prototext(
+    prototext_file,
+    trainer=trainer,
+    model=model,
+    data_reader=reader,
+    optimizer=opt,
+)
+script.add_parallel_command([
+    lbann.lbann_exe(),
+    f'--prototext={prototext_file}',
+    f'--num_io_threads=1',
+])
+
+# Run LBANN
+script.run()
