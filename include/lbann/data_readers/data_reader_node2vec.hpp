@@ -81,6 +81,7 @@ private:
   std::unique_ptr<node2vec_reader_impl::DistributedDatabase> m_distributed_database;
   std::unique_ptr<node2vec_reader_impl::EdgeWeightData> m_edge_weight_data;
   std::unique_ptr<node2vec_reader_impl::RandomWalker> m_random_walker;
+  std::vector<size_t> m_local_vertices;
 
   std::string m_graph_file;
   std::string m_backup_file;

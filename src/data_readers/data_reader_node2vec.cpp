@@ -27,6 +27,7 @@
 #include "lbann/data_readers/data_reader_node2vec.hpp"
 #ifdef LBANN_HAS_LARGESCALE_NODE2VEC
 #include "lbann/utils/memory.hpp"
+#include "lbann/utils/random.hpp"
 #include <dist/node2vec_rw/node2vec_rw.hpp>
 #include <havoqgt/distributed_db.hpp>
 #include <havoqgt/delegate_partitioned_graph.hpp>
@@ -37,23 +38,26 @@ namespace node2vec_reader_impl {
 
   class DistributedDatabase : public ::havoqgt::distributed_db {
   public:
+    using BaseType = ::havoqgt::distributed_db;
     template <typename... Args>
-    DistributedDatabase(Args... args)
-      : ::havoqgt::distributed_db(args...) {}
+    DistributedDatabase(Args&&... args)
+      : BaseType(std::forward<Args>(args)...) {}
   };
 
   class RandomWalker : public ::node2vec_rw::node2vec_rw<> {
   public:
+    using BaseType = ::node2vec_rw::node2vec_rw<>;
     template <typename... Args>
-    RandomWalker(Args... args)
-      : ::node2vec_rw::node2vec_rw<>(args...) {}
+    RandomWalker(Args&&... args)
+      : BaseType(std::forward<Args>(args)...) {}
   };
 
   class EdgeWeightData : public RandomWalker::edge_weight_data_type {
   public:
+    using BaseType = RandomWalker::edge_weight_data_type;
     template <typename... Args>
-    EdgeWeightData(Args... args)
-      : RandomWalker::edge_weight_data_type(args...) {}
+    EdgeWeightData(Args&&... args)
+      : BaseType(std::forward<Args>(args)...) {}
   };
 
 } // namespace node2vec_reader_impl
@@ -129,10 +133,11 @@ bool node2vec_reader::fetch_data_block(
   std::vector<Vertex> start_vertices;
   start_vertices.reserve(mb_size);
   for (El::Int i=0; i<mb_size; ++i) {
-    const auto& sample_index
-      = m_shuffled_indices[m_current_pos+i*m_sample_stride];
-    start_vertices.push_back(graph.label_to_locator(sample_index));
-    indices_fetched.Set(i, 0, sample_index);
+    const auto& local_index
+      = fast_rand_int(get_fast_io_generator(), m_local_vertices.size());
+    const auto& vertex = graph.label_to_locator(m_local_vertices[local_index]);
+    start_vertices.push_back(vertex);
+    indices_fetched.Set(i, 0, m_shuffled_indices[m_current_pos+i*m_sample_stride]);
   }
 
   // Perform random walks
@@ -174,7 +179,7 @@ void node2vec_reader::load() {
 
   // Load edge data
   m_edge_weight_data.reset();
-  auto* edge_weight_data = m_distributed_database->get_segment_manager()->find<EdgeWeightData>("graph_edge_weight_data_obj").first;
+  auto* edge_weight_data = m_distributed_database->get_segment_manager()->find<EdgeWeightData::BaseType>("graph_edge_data_obj").first;
   if (edge_weight_data == nullptr) {
     m_edge_weight_data = make_unique<EdgeWeightData>(graph);
     m_edge_weight_data->reset(1.0);
@@ -183,7 +188,8 @@ void node2vec_reader::load() {
   MPI_Barrier(MPI_COMM_WORLD); /// @todo Use lbann_comm
 
   // Construct random walker
-  bool small_edge_weight_variance = false;
+  constexpr bool small_edge_weight_variance = false;
+  constexpr bool verbose = false;
   MPI_Comm comm = MPI_COMM_WORLD; /// @todo Use lbann_comm
   m_random_walker = make_unique<RandomWalker>(
     graph,
@@ -192,8 +198,18 @@ void node2vec_reader::load() {
     m_walk_length,
     m_return_param,
     m_inout_param,
-    comm);
+    comm,
+    verbose);
   MPI_Barrier(MPI_COMM_WORLD); /// @todo Use lbann_comm
+
+  // Get local vertices
+  m_local_vertices.clear();
+  m_local_vertices.reserve(graph.num_local_vertices());
+  for (auto iter = graph.vertices_begin();
+       iter != graph.vertices_end();
+       ++iter) {
+    m_local_vertices.push_back(graph.locator_to_label(*iter));
+  }
 
   // Construct list of indices
   m_shuffled_indices.resize(graph.max_global_vertex_id()+1);

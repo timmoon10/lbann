@@ -159,7 +159,6 @@ model = lbann.Model(args.mini_batch_size,
 
 # Create batch script
 kwargs = lbann.contrib.args.get_scheduler_kwargs(args)
-kwargs['procs_per_node'] = 1 ### @todo Remove
 script = lbann.contrib.launcher.make_batch_script(
     job_name=args.job_name,
     work_dir=args.work_dir,
@@ -179,6 +178,7 @@ if not args.offline_walks:
         ingest_graph_exe,
         f'-o {distributed_graph_file}',
         f'-d {2**30}',
+        '-u 1',
         graph_file,
     ])
 

@@ -59,8 +59,8 @@ eval ${build_command}
 popd > /dev/null
 
 # Build largescale_node2vec
-mkdir largescale_nodevec
-pushd largescale_nodevec > /dev/null
+mkdir largescale_node2vec
+pushd largescale_node2vec > /dev/null
 configure_command=$(cat << EOF
 cmake \
 --verbose=1 \
