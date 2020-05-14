@@ -29,8 +29,8 @@ weighted = False
 walk_length = 80        # Length of each random walk
 walk_context_length = 10    # Sequence length for Skip-gram
 walks_per_node = 10     # Number of random walks starting on each node
-return_param = 0.25     # p-parameter
-inout_param = 0.25      # q-parameter
+return_param = 1.0      # p-parameter
+inout_param = 1.0       # q-parameter
 
 # Negative sampling options
 num_negative_samples = 5

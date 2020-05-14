@@ -195,6 +195,7 @@ bool node2vec_reader::fetch_label(CPUMat& Y, int data_id, int col) {
 }
 
 void node2vec_reader::load() {
+  auto& comm = *get_comm();
 
   // Copy backup file if needed
   if (!m_backup_file.empty()) {
@@ -217,12 +218,11 @@ void node2vec_reader::load() {
     m_edge_weight_data->reset(1.0);
     edge_weight_data = m_edge_weight_data.get();
   }
-  MPI_Barrier(MPI_COMM_WORLD); /// @todo Use lbann_comm
+  comm.trainer_barrier();
 
   // Construct random walker
   constexpr bool small_edge_weight_variance = false;
   constexpr bool verbose = false;
-  MPI_Comm comm = MPI_COMM_WORLD; /// @todo Use lbann_comm
   m_random_walker = make_unique<RandomWalker>(
     graph,
     *edge_weight_data,
@@ -230,9 +230,9 @@ void node2vec_reader::load() {
     m_walk_length,
     m_return_param,
     m_inout_param,
-    comm,
+    comm.get_trainer_comm().GetMPIComm(),
     verbose);
-  MPI_Barrier(MPI_COMM_WORLD); /// @todo Use lbann_comm
+  comm.trainer_barrier();
 
   // Get local vertices
   // Note: Estimate frequency of vertex visits using the vertex

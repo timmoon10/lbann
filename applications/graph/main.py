@@ -126,13 +126,13 @@ preds_slice = lbann.Slice(
 preds_negative = lbann.Identity(preds_slice)
 preds_positive = lbann.Identity(preds_slice)
 obj_positive = lbann.LogSigmoid(preds_positive)
-obj_positive = lbann.Reduction(obj_positive, mode='sum')
+obj_positive = lbann.Reduction(obj_positive, mode='average')
 obj_negative = lbann.WeightedSum(preds_negative, scaling_factors='-1')
 obj_negative = lbann.LogSigmoid(obj_negative)
-obj_negative = lbann.Reduction(obj_negative, mode='sum')
+obj_negative = lbann.Reduction(obj_negative, mode='average')
 obj = [
     lbann.LayerTerm(obj_positive, scale=-1),
-    lbann.LayerTerm(obj_negative, scale=-1/num_negative_samples),
+    lbann.LayerTerm(obj_negative, scale=-1),
 ]
 
 # ----------------------------------
