@@ -62,7 +62,6 @@ INSTALL_DIR=
 BUILD_SUFFIX=
 DETERMINISTIC=OFF
 WITH_CUDA=
-WITH_CUDA_2=ON
 WITH_TOPO_AWARE=ON
 INSTRUMENT=
 WITH_ALUMINUM=
@@ -254,7 +253,6 @@ while :; do
             ;;
         --disable-cuda)
             WITH_CUDA=OFF
-            WITH_CUDA_2=OFF
             ;;
         --disable-topo-aware)
             WITH_TOPO_AWARE=OFF
@@ -287,6 +285,8 @@ while :; do
         --with-distconv)
             WITH_DISTCONV=ON
             WITH_DIHYDROGEN=ON
+            # CUDA is required for Distconv
+            WITH_CUDA=ON
             # MPI-CUDA backend is required for Distconv
             ALUMINUM_WITH_MPI_CUDA=ON
             ;;
@@ -817,6 +817,7 @@ cmake \
 -D LBANN_SB_BUILD_PROTOBUF=ON \
 -D LBANN_SB_BUILD_CUB=${WITH_CUB} \
 -D LBANN_SB_BUILD_ALUMINUM=${WITH_ALUMINUM} \
+-D ALUMINUM_TAG=v0.3.3 \
 -D ALUMINUM_ENABLE_MPI_CUDA=${ALUMINUM_WITH_MPI_CUDA} \
 -D ALUMINUM_ENABLE_NCCL=${ALUMINUM_WITH_NCCL} \
 -D LBANN_SB_BUILD_CONDUIT=${WITH_CONDUIT} \

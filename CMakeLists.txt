@@ -657,6 +657,7 @@ add_subdirectory(model_zoo)
 add_subdirectory(model_zoo/tests)
 add_subdirectory(model_zoo/jag_utils)
 add_subdirectory(applications/CANDLE/pilot2/tools)
+add_subdirectory(applications/ATOM/utils)
 add_subdirectory(tests)
 add_subdirectory(scripts)
 
@@ -852,6 +853,7 @@ string(APPEND _str "\n")
 append_str_tf(_str
   LBANN_GNU_LINUX
   LBANN_HAS_DIHYDROGEN
+  LBANN_HAS_DISTCONV
   LBANN_HAS_HYDROGEN
   LBANN_HAS_OPENCV
   LBANN_HAS_CEREAL
