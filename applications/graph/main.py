@@ -24,8 +24,8 @@ parser.add_argument(
     '--mini-batch-size', action='store', default=256, type=int,
     help='mini-batch size (default: 256)', metavar='NUM')
 parser.add_argument(
-    '--num-epochs', action='store', default=1, type=int,
-    help='number of epochs (default: 1)', metavar='NUM')
+    '--num-epochs', action='store', default=10, type=int,
+    help='number of epochs (default: 10)', metavar='NUM')
 parser.add_argument(
     '--latent-dim', action='store', default=128, type=int,
     help='latent space dimensions (default: 128)', metavar='NUM')

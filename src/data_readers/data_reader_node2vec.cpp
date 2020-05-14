@@ -125,6 +125,7 @@ bool node2vec_reader::fetch_data_block(
   El::Int mb_size,
   El::Matrix<El::Int>& indices_fetched) {
   if (thread_id != 0) { return true; }
+  const size_t mb_size_ = mb_size;
 
   // Get HavoqGT graph
   const auto& graph = *m_distributed_database->get_segment_manager()->find<Graph>("graph_obj").first;
@@ -132,27 +133,58 @@ bool node2vec_reader::fetch_data_block(
   // Get starting vertices for random walks
   std::vector<Vertex> start_vertices;
   start_vertices.reserve(mb_size);
+  const size_t num_local_vertices = m_local_vertex_global_indices.size();
   for (El::Int i=0; i<mb_size; ++i) {
-    const auto& local_index
-      = fast_rand_int(get_fast_io_generator(), m_local_vertices.size());
-    const auto& vertex = graph.label_to_locator(m_local_vertices[local_index]);
-    start_vertices.push_back(vertex);
+    const auto& local_index = fast_rand_int(get_fast_io_generator(),
+                                            num_local_vertices);
+    const auto& global_index = m_local_vertex_global_indices[local_index];
+    start_vertices.push_back(graph.label_to_locator(global_index));
     indices_fetched.Set(i, 0, m_shuffled_indices[m_current_pos+i*m_sample_stride]);
   }
 
   // Perform random walks
   const auto walks = m_random_walker->run_walker(start_vertices);
 
-  // Generate negative samples
-  /// @todo Implement
-
-  // Populate output tensor
-  const size_t mb_size_ = mb_size;
+  // Record visits to local vertices
   for (size_t j=0; j<mb_size_; ++j) {
     for (size_t i=0; i<m_walk_length; ++i) {
-      const auto vertex = graph.locator_to_label(walks[j][i]);
-      X(i+m_num_negative_samples,j) = static_cast<float>(vertex);
+      const auto& vertex = walks[j][i];
+      if (!vertex.is_delegate()) {
+        const size_t global_index = graph.locator_to_label(vertex);
+        const size_t local_index = m_local_vertex_local_indices[global_index];
+        ++m_local_vertex_visit_counts[local_index];
+        ++m_total_visit_count;
+      }
     }
+  }
+
+  // Recompute noise distribution if there are enough vertex visits
+  if (m_total_visit_count > 2*m_noise_visit_count) {
+    compute_noise_distribution();
+  }
+
+  // Populate output tensor
+  /// @todo Parallelize
+  for (size_t j=0; j<mb_size_; ++j) {
+
+    // Negative samples
+    for (size_t i=0; i<m_num_negative_samples; ++i) {
+      const size_t local_index = std::distance(
+        std::lower_bound(
+          m_local_vertex_noise_distribution.begin(),
+          m_local_vertex_noise_distribution.end(),
+          fast_random_uniform<double>(get_fast_io_generator())),
+        m_local_vertex_noise_distribution.begin());
+      const size_t global_index = m_local_vertex_global_indices[local_index];
+      X(i,j) = static_cast<float>(global_index);
+    }
+
+    // Random walks
+    for (size_t i=0; i<m_walk_length; ++i) {
+      const auto global_index = graph.locator_to_label(walks[j][i]);
+      X(i+m_num_negative_samples,j) = static_cast<float>(global_index);
+    }
+
   }
 
   return true;
@@ -203,19 +235,66 @@ void node2vec_reader::load() {
   MPI_Barrier(MPI_COMM_WORLD); /// @todo Use lbann_comm
 
   // Get local vertices
-  m_local_vertices.clear();
-  m_local_vertices.reserve(graph.num_local_vertices());
+  // Note: Estimate frequency of vertex visits using the vertex
+  // degree, plus 1 for Laplace smoothing.
+  const auto num_local_vertices = graph.num_local_vertices();
+  if (num_local_vertices == 0) {
+    LBANN_ERROR("node2vec data reader loaded a graph with no local vertices");
+  }
+  m_local_vertex_global_indices.clear();
+  m_local_vertex_global_indices.reserve(num_local_vertices);
+  m_local_vertex_local_indices.clear();
+  m_local_vertex_local_indices.reserve(num_local_vertices);
+  m_local_vertex_visit_counts.clear();
+  m_local_vertex_visit_counts.reserve(num_local_vertices);
   for (auto iter = graph.vertices_begin();
        iter != graph.vertices_end();
        ++iter) {
-    m_local_vertices.push_back(graph.locator_to_label(*iter));
+    const auto& vertex = *iter;
+    const auto& degree = graph.degree(vertex);
+    const auto& global_index = graph.locator_to_label(vertex);
+    const auto& local_index = m_local_vertex_global_indices.size();
+    m_local_vertex_global_indices.push_back(global_index);
+    m_local_vertex_local_indices[global_index] = local_index;
+    m_local_vertex_visit_counts.push_back(degree+1);
   }
+
+  // Compute noise distribution for negative sampling
+  compute_noise_distribution();
 
   // Construct list of indices
   m_shuffled_indices.resize(graph.max_global_vertex_id()+1);
   std::iota(m_shuffled_indices.begin(), m_shuffled_indices.end(), 0);
   resize_shuffled_indices();
   select_subset_of_data();
+
+}
+
+/// @todo Parallelize
+void node2vec_reader::compute_noise_distribution() {
+
+  // Count number of times each local vertex has been visited
+  // Note: Distribution is proportional to count^0.75
+  const size_t num_local_vertices = m_local_vertex_global_indices.size();
+  m_local_vertex_noise_distribution.resize(num_local_vertices);
+  m_noise_visit_count = 0;
+  for (size_t i=0; i<num_local_vertices; ++i) {
+    const auto& count = m_local_vertex_visit_counts[i];
+    m_local_vertex_noise_distribution[i] = std::pow(count, 0.75);
+    if (i > 0) {
+      m_local_vertex_noise_distribution[i]
+        += m_local_vertex_noise_distribution[i-1];
+    }
+    m_noise_visit_count += count;
+  }
+  m_total_visit_count = m_noise_visit_count;
+
+  // Normalize to get CDF
+  const double scale = 1. / m_local_vertex_noise_distribution.back();
+  std::transform(m_local_vertex_noise_distribution.begin(),
+                 m_local_vertex_noise_distribution.end(),
+                 m_local_vertex_noise_distribution.begin(),
+                 [&scale](const double& x) -> double { return scale*x; });
 
 }
 

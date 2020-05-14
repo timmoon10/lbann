@@ -78,18 +78,69 @@ protected:
 
 private:
 
-  std::unique_ptr<node2vec_reader_impl::DistributedDatabase> m_distributed_database;
-  std::unique_ptr<node2vec_reader_impl::EdgeWeightData> m_edge_weight_data;
-  std::unique_ptr<node2vec_reader_impl::RandomWalker> m_random_walker;
-  std::vector<size_t> m_local_vertices;
+  /** Compute noise distribution for negative sampling.
+   *
+   *  If a vertex has been visited @f$ \text{count} @f$ times, then
+   *  its probability in the noise distribution is
+   *  @f$ \text{count}^{0.75} @f$.
+   */
+  void compute_noise_distribution();
 
+  /** HavoqGT database for distributed graph. */
+  std::unique_ptr<node2vec_reader_impl::DistributedDatabase> m_distributed_database;
+  /** Edge weights for distributed graph. */
+  std::unique_ptr<node2vec_reader_impl::EdgeWeightData> m_edge_weight_data;
+  /** Manager for node2vec random walks on distributed graph. */
+  std::unique_ptr<node2vec_reader_impl::RandomWalker> m_random_walker;
+
+  /** Global indices of local graph vertices. */
+  std::vector<size_t> m_local_vertex_global_indices;
+  /** Local indices of local graph vertices.
+   *
+   *  Inverse of @c m_local_vertex_global_indices.
+   */
+  std::unordered_map<size_t,size_t> m_local_vertex_local_indices;
+
+  /** Number of times each local vertex has been visited in random
+   *  walks.
+   */
+  std::vector<size_t> m_local_vertex_visit_counts;
+  /** Noise distribution for negative sampling.
+   *
+   *  The values comprise a cumulative distribution function, i.e. the
+   *  values are in [0,1], they are sorted in ascending order, and the
+   *  last value is 1. To reduce communication, we only perform
+   *  negative sampling with local vertices.
+   *
+   *  Computed in @c compute_noise_distribution.
+   */
+  std::vector<double> m_local_vertex_noise_distribution;
+
+  /** Total number of times local vertices have been visited in random
+   *  walks.
+   *
+   *  This is the sum of @c m_local_vertex_visit_counts.
+   */
+  size_t m_total_visit_count{0};
+  /** The value of @c m_total_visit_count when the noise distribution
+   *  was last computed.
+   */
+  size_t m_noise_visit_count{0};
+
+  /** HavoqGT graph file.
+   *
+   *  This should be processed with HavoqGT's @c ingest_edge_list
+   *  program and cached in shared memory.
+   */
   std::string m_graph_file;
   std::string m_backup_file;
+  /** Length of each random walk. */
   size_t m_walk_length;
   /** @brief node2vec p parameter. */
   double m_return_param;
   /** @brief node2vec q parameter. */
   double m_inout_param;
+  /** Number of negative samples per walk. */
   size_t m_num_negative_samples;
 
 };
