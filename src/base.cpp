@@ -54,6 +54,9 @@
 #ifdef LBANN_HAS_NVSHMEM
 #include "lbann/utils/nvshmem.hpp"
 #endif
+#ifdef LBANN_HAS_DISTCONV
+#include "lbann/utils/distconv.hpp"
+#endif
 
 #include <iostream>
 #include <string>
@@ -117,6 +120,10 @@ world_comm_ptr initialize(int& argc, char**& argv, int seed) {
   }
 #endif // LBANN_HAS_SHMEM
 
+#ifdef LBANN_HAS_DISTCONV
+  dc::initialize(MPI_COMM_WORLD);
+#endif // LBANN_HAS_DISTCONV
+
   return comm;
 }
 
@@ -125,6 +132,9 @@ void finalize(lbann_comm* comm) {
   nvshmem::finalize();
 #endif // LBANN_HAS_NVSHMEM
   MPI_Errhandler_free( &err_handle );
+#ifdef LBANN_HAS_DISTCONV
+  dc::finalize();
+#endif
 #ifdef LBANN_HAS_CUDNN
   cudnn::destroy();
 #endif

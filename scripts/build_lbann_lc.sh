@@ -63,7 +63,6 @@ INSTALL_DIR=
 BUILD_SUFFIX=
 DETERMINISTIC=OFF
 WITH_CUDA=
-WITH_CUDA_2=ON
 WITH_TOPO_AWARE=ON
 INSTRUMENT=
 WITH_ALUMINUM=
@@ -81,7 +80,7 @@ USE_NINJA=0
 # by enabling LIBJPEG_TURBO_DIR
 WITH_LIBJPEG_TURBO=ON
 #LIBJPEG_TURBO_DIR="/p/lscratchh/brainusr/libjpeg-turbo-1.5.2"
-WITH_NVSHMEM=1
+WITH_NVSHMEM=0
 NVSHMEM_DIR=
 
 function version_gt() { test "$(printf '%s\n' "$@" | sort -V | head -n 1)" != "$1"; }
@@ -255,7 +254,6 @@ while :; do
             ;;
         --disable-cuda)
             WITH_CUDA=OFF
-            WITH_CUDA_2=OFF
             ;;
         --disable-topo-aware)
             WITH_TOPO_AWARE=OFF
@@ -288,6 +286,8 @@ while :; do
         --with-distconv)
             WITH_DISTCONV=ON
             WITH_DIHYDROGEN=ON
+            # CUDA is required for Distconv
+            WITH_CUDA=ON
             # MPI-CUDA backend is required for Distconv
             ALUMINUM_WITH_MPI_CUDA=ON
             ;;
@@ -487,8 +487,7 @@ if [ ${WITH_NVSHMEM} -ne 0 ]; then
 fi
 
 # Hacks to build with largescale_node2vec and HavoqGT
-#WITH_LARGESCALE_NODE2VEC=0
-WITH_LARGESCALE_NODE2VEC=1
+WITH_LARGESCALE_NODE2VEC=0
 CXX_FLAGS="${CXX_FLAGS} -isystem ${ROOT_DIR}/applications/graph/largescale_node2vec/include -isystem ${ROOT_DIR}/applications/graph/havoqgt/include"
 C_FLAGS="${CXX_FLAGS}"
 
@@ -821,6 +820,7 @@ cmake \
 -D LBANN_SB_BUILD_PROTOBUF=ON \
 -D LBANN_SB_BUILD_CUB=${WITH_CUB} \
 -D LBANN_SB_BUILD_ALUMINUM=${WITH_ALUMINUM} \
+-D ALUMINUM_TAG=v0.3.3 \
 -D ALUMINUM_ENABLE_MPI_CUDA=${ALUMINUM_WITH_MPI_CUDA} \
 -D ALUMINUM_ENABLE_NCCL=${ALUMINUM_WITH_NCCL} \
 -D LBANN_SB_BUILD_CONDUIT=${WITH_CONDUIT} \
