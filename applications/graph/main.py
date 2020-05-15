@@ -54,9 +54,10 @@ if args.learning_rate < 0:
 import data.offline_walks
 graph_file = data.offline_walks.graph_file
 num_graph_nodes = data.offline_walks.max_graph_node_id() + 1
-walk_length = data.offline_walks.walk_context_length
+walk_length = data.offline_walks.walk_context_size # data.offline_walks.walk_length
 return_param = data.offline_walks.return_param
 inout_param = data.offline_walks.inout_param
+walk_context_size = data.offline_walks.walk_context_size
 num_negative_samples = data.offline_walks.num_negative_samples
 
 # Construct data reader
@@ -68,7 +69,7 @@ else:
     distributed_graph_file = '/dev/shm/graph'
     reader = data.data_readers.make_online_data_reader(
         graph_file=distributed_graph_file,
-        walk_length=walk_length,
+        walk_context_size=walk_context_size,
         return_param=return_param,
         inout_param=inout_param,
         num_negative_samples=num_negative_samples,
@@ -98,7 +99,7 @@ decoder_embeddings_weights = lbann.Weights(
 input_ = lbann.Identity(lbann.Input())
 input_slice = lbann.Slice(
     input_,
-    slice_points=f'0 {num_negative_samples+1} {num_negative_samples+walk_length}'
+    slice_points=f'0 {num_negative_samples+1} {num_negative_samples+walk_context_size}'
 )
 decoder_embeddings = lbann.DistEmbedding(
     input_slice,

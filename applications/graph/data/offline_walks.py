@@ -27,7 +27,7 @@ weighted = False
 
 # Random walk options
 walk_length = 80        # Length of each random walk
-walk_context_length = 10    # Sequence length for Skip-gram
+walk_context_size = 10  # Sequence length for Skip-gram
 walks_per_node = 10     # Number of random walks starting on each node
 return_param = 1.0      # p-parameter
 inout_param = 1.0       # q-parameter
@@ -91,10 +91,10 @@ def get_sample(index):
         need_to_seed_rng = False
 
     # Get context window from random walk
-    contexts_per_walk = walk_length - walk_context_length + 1
+    contexts_per_walk = walk_length - walk_context_size + 1
     walk_index, context_index = divmod(index, contexts_per_walk)
     walk_context = walks[walk_index,
-                         context_index:context_index+walk_context_length]
+                         context_index:context_index+walk_context_size]
 
     # Generate negative samples
     negative_samples = np.searchsorted(noise_distribution_cdf,
@@ -106,12 +106,12 @@ def get_sample(index):
 def num_samples():
     """Number of samples in dataset."""
     num_walks = walks.shape[0]
-    contexts_per_walk = walk_length - walk_context_length + 1
+    contexts_per_walk = walk_length - walk_context_size + 1
     return num_walks * contexts_per_walk
 
 def sample_dims():
     """Dimensions of a data sample."""
-    return (walk_context_length + num_negative_samples,)
+    return (walk_context_size + num_negative_samples,)
 
 def max_graph_node_id(graph_file=graph_file):
     """Largest node ID in graph.

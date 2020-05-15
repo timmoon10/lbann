@@ -76,6 +76,7 @@ node2vec_reader::node2vec_reader(
   size_t walk_length,
   double return_param,
   double inout_param,
+  size_t walk_context_size,
   size_t num_negative_samples)
   : generic_data_reader(true),
     m_graph_file(std::move(graph_file)),
@@ -83,8 +84,14 @@ node2vec_reader::node2vec_reader(
     m_walk_length{walk_length},
     m_return_param{return_param},
     m_inout_param{inout_param},
-    m_num_negative_samples{num_negative_samples}
-{}
+    m_walk_context_size{walk_context_size},
+    m_num_negative_samples{num_negative_samples} {
+  if (m_walk_context_size > m_walk_length) {
+    LBANN_ERROR("attempted to create node2vec data reader ",
+                "with the walk context size (",m_walk_context_size,") ",
+                "larger than the walk length (",m_walk_length,")");
+  }
+}
 
 node2vec_reader::~node2vec_reader() {
   // Deallocate objects in right order
@@ -103,8 +110,7 @@ std::string node2vec_reader::get_type() const {
 
 const std::vector<int> node2vec_reader::get_data_dims() const {
   std::vector<int> dims;
-  /// @todo Use walk windows
-  dims.push_back(static_cast<int>(m_walk_length + m_num_negative_samples));
+  dims.push_back(static_cast<int>(m_walk_context_size + m_num_negative_samples));
   return dims;
 }
 int node2vec_reader::get_num_labels() const {
@@ -137,7 +143,7 @@ bool node2vec_reader::fetch_data_block(
   for (El::Int i=0; i<mb_size; ++i) {
     const auto& local_index = fast_rand_int(get_fast_io_generator(),
                                             num_local_vertices);
-    const auto& global_index = m_local_vertex_global_indices[local_index];
+    const auto& global_index = m_local_vertex_global_indices.at(local_index);
     start_vertices.push_back(graph.label_to_locator(global_index));
     indices_fetched.Set(i, 0, m_shuffled_indices[m_current_pos+i*m_sample_stride]);
   }
@@ -146,12 +152,11 @@ bool node2vec_reader::fetch_data_block(
   const auto walks = m_random_walker->run_walker(start_vertices);
 
   // Record visits to local vertices
-  for (size_t j=0; j<mb_size_; ++j) {
-    for (size_t i=0; i<m_walk_length; ++i) {
-      const auto& vertex = walks[j][i];
-      if (!vertex.is_delegate()) {
-        const size_t global_index = graph.locator_to_label(vertex);
-        const size_t local_index = m_local_vertex_local_indices[global_index];
+  for (const auto& walk : walks) {
+    for (const auto& vertex : walk) {
+      const size_t global_index = graph.locator_to_label(vertex);
+      if (m_local_vertex_local_indices.count(global_index) != 0) {
+        const size_t local_index = m_local_vertex_local_indices.at(global_index);
         ++m_local_vertex_visit_counts[local_index];
         ++m_total_visit_count;
       }
@@ -180,7 +185,7 @@ bool node2vec_reader::fetch_data_block(
     }
 
     // Random walks
-    for (size_t i=0; i<m_walk_length; ++i) {
+    for (size_t i=0; i<m_walk_context_size; ++i) {
       const auto global_index = graph.locator_to_label(walks[j][i]);
       X(i+m_num_negative_samples,j) = static_cast<float>(global_index);
     }
@@ -275,6 +280,7 @@ void node2vec_reader::compute_noise_distribution() {
 
   // Count number of times each local vertex has been visited
   // Note: Distribution is proportional to count^0.75
+  /// @todo If numerical error becomes a problem, use Kahan summation
   const size_t num_local_vertices = m_local_vertex_global_indices.size();
   m_local_vertex_noise_distribution.resize(num_local_vertices);
   m_noise_visit_count = 0;
