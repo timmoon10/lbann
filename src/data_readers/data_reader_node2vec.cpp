@@ -32,6 +32,9 @@
 #include <havoqgt/distributed_db.hpp>
 #include <havoqgt/delegate_partitioned_graph.hpp>
 
+#include <algorithm>
+#include <numeric>
+
 namespace lbann {
 
 namespace node2vec_reader_impl {
@@ -133,33 +136,25 @@ bool node2vec_reader::fetch_data_block(
   if (thread_id != 0) { return true; }
   const size_t mb_size_ = mb_size;
 
-  // Get HavoqGT graph
-  const auto& graph = *m_distributed_database->get_segment_manager()->find<Graph>("graph_obj").first;
+  // Function to compute random index in [0,max)
+  const auto rand_index = [](size_t max) -> size_t {
+    return fast_rand_int(get_io_generator(), max);
+  };
 
-  // Get starting vertices for random walks
-  std::vector<Vertex> start_vertices;
-  start_vertices.reserve(mb_size);
-  const size_t num_local_vertices = m_local_vertex_global_indices.size();
-  for (El::Int i=0; i<mb_size; ++i) {
-    const auto& local_index = fast_rand_int(get_fast_io_generator(),
-                                            num_local_vertices);
-    const auto& global_index = m_local_vertex_global_indices.at(local_index);
-    start_vertices.push_back(graph.label_to_locator(global_index));
-    indices_fetched.Set(i, 0, m_shuffled_indices[m_current_pos+i*m_sample_stride]);
-  }
-
-  // Perform random walks
-  const auto walks = m_random_walker->run_walker(start_vertices);
-
-  // Record visits to local vertices
-  for (const auto& walk : walks) {
-    for (const auto& vertex : walk) {
-      const size_t global_index = graph.locator_to_label(vertex);
-      if (m_local_vertex_local_indices.count(global_index) != 0) {
-        const size_t local_index = m_local_vertex_local_indices.at(global_index);
-        ++m_local_vertex_visit_counts[local_index];
-        ++m_total_visit_count;
-      }
+  // Randomly update cache of random walks
+  // Note: The cache size is at least the local mini-batch size.
+  /// @todo Avoid overwriting new walks
+  const auto contexts_per_walk = m_walk_length - m_walk_context_size + 1;
+  auto num_walks = (mb_size_ + contexts_per_walk - 1) / contexts_per_walk;
+  num_walks = El::Max(num_walks, m_walks_cache.size() - mb_size_);
+  num_walks = El::Max(num_walks, 1);
+  auto walks = run_walker(num_walks);
+  for (auto& walk : walks) {
+    if (m_walks_cache.size() < mb_size_) {
+      m_walks_cache.emplace_back(std::move(walk));
+    }
+    else {
+      m_walks_cache[rand_index(m_walks_cache.size())] = std::move(walk);
     }
   }
 
@@ -172,22 +167,29 @@ bool node2vec_reader::fetch_data_block(
   /// @todo Parallelize
   for (size_t j=0; j<mb_size_; ++j) {
 
-    // Negative samples
-    for (size_t i=0; i<m_num_negative_samples; ++i) {
-      const size_t local_index = std::distance(
-        std::lower_bound(
-          m_local_vertex_noise_distribution.begin(),
-          m_local_vertex_noise_distribution.end(),
-          fast_random_uniform<double>(get_fast_io_generator())),
-        m_local_vertex_noise_distribution.begin());
-      const size_t global_index = m_local_vertex_global_indices[local_index];
-      X(i,j) = static_cast<float>(global_index);
+    // Context window in random walk
+    const auto cache_pos
+      = rand_index(contexts_per_walk*m_walks_cache.size());
+    const auto& walk = m_walks_cache[cache_pos / contexts_per_walk];
+    const auto offset = cache_pos % contexts_per_walk;
+    const auto start_index = walk[offset];
+    for (size_t i=0; i<m_walk_context_size; ++i) {
+      X(i+m_num_negative_samples,j) = static_cast<float>(walk[i+offset]);
     }
 
-    // Random walks
-    for (size_t i=0; i<m_walk_context_size; ++i) {
-      const auto global_index = graph.locator_to_label(walks[j][i]);
-      X(i+m_num_negative_samples,j) = static_cast<float>(global_index);
+    // Negative samples
+    for (size_t i=0; i<m_num_negative_samples; ++i) {
+      size_t global_index;
+      do {
+        const auto local_index = std::distance(
+          m_local_vertex_noise_distribution.begin(),
+          std::lower_bound(
+            m_local_vertex_noise_distribution.begin(),
+            m_local_vertex_noise_distribution.end(),
+            fast_random_uniform<double>(get_io_generator())));
+        global_index = m_local_vertex_global_indices[local_index];
+      } while (global_index == start_index);
+      X(i,j) = static_cast<float>(global_index);
     }
 
   }
@@ -242,7 +244,7 @@ void node2vec_reader::load() {
   // Get local vertices
   // Note: Estimate frequency of vertex visits using the vertex
   // degree, plus 1 for Laplace smoothing.
-  const auto num_local_vertices = graph.num_local_vertices();
+  const size_t num_local_vertices = graph.num_local_vertices();
   if (num_local_vertices == 0) {
     LBANN_ERROR("node2vec data reader loaded a graph with no local vertices");
   }
@@ -275,27 +277,72 @@ void node2vec_reader::load() {
 
 }
 
+std::vector<std::vector<size_t>> node2vec_reader::run_walker(size_t num_walks) {
+
+  // HavoqGT graph
+  const auto& graph = *m_distributed_database->get_segment_manager()->find<Graph>("graph_obj").first;
+  const auto num_local_vertices = m_local_vertex_global_indices.size();
+
+  // Randomly choose start vertices for random walks
+  std::vector<Vertex> start_vertices;
+  start_vertices.reserve(num_walks);
+  for (size_t i=0; i<num_walks; ++i) {
+    const auto& local_index = fast_rand_int(get_io_generator(),
+                                            num_local_vertices);
+    const auto& global_index = m_local_vertex_global_indices.at(local_index);
+    start_vertices.push_back(graph.label_to_locator(global_index));
+  }
+
+  // Perform random walks
+  const auto walks_vertices = m_random_walker->run_walker(start_vertices);
+
+  // Convert walks to vertex indices
+  std::vector<std::vector<size_t>> walks_indices;
+  walks_indices.reserve(walks_vertices.size());
+  for (const auto& walk_vertices : walks_vertices) {
+    walks_indices.emplace_back();
+    auto& walk_indices = walks_indices.back();
+    walk_indices.reserve(walk_vertices.size());
+    for (const auto& vertex : walk_vertices) {
+      walk_indices.emplace_back(graph.locator_to_label(vertex));
+    }
+  }
+
+  // Record visits to local vertices
+  for (const auto& walk : walks_indices) {
+    for (const auto& global_index : walk) {
+      if (m_local_vertex_local_indices.count(global_index) != 0) {
+        const auto& local_index = m_local_vertex_local_indices.at(global_index);
+        ++m_local_vertex_visit_counts[local_index];
+        ++m_total_visit_count;
+      }
+    }
+  }
+
+  return walks_indices;
+
+}
+
 /// @todo Parallelize
 void node2vec_reader::compute_noise_distribution() {
 
   // Count number of times each local vertex has been visited
   // Note: Distribution is proportional to count^0.75
-  /// @todo If numerical error becomes a problem, use Kahan summation
   const size_t num_local_vertices = m_local_vertex_global_indices.size();
   m_local_vertex_noise_distribution.resize(num_local_vertices);
   m_noise_visit_count = 0;
   for (size_t i=0; i<num_local_vertices; ++i) {
     const auto& count = m_local_vertex_visit_counts[i];
     m_local_vertex_noise_distribution[i] = std::pow(count, 0.75);
-    if (i > 0) {
-      m_local_vertex_noise_distribution[i]
-        += m_local_vertex_noise_distribution[i-1];
-    }
     m_noise_visit_count += count;
   }
   m_total_visit_count = m_noise_visit_count;
 
-  // Normalize to get CDF
+  // Compute CDF by computing cumsum and normalizing
+  /// @todo If numerical error becomes a problem, use Kahan summation
+  std::partial_sum(m_local_vertex_noise_distribution.begin(),
+                   m_local_vertex_noise_distribution.end(),
+                   m_local_vertex_noise_distribution.begin());
   const double scale = 1. / m_local_vertex_noise_distribution.back();
   std::transform(m_local_vertex_noise_distribution.begin(),
                  m_local_vertex_noise_distribution.end(),
