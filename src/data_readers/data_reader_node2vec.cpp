@@ -186,7 +186,7 @@ bool node2vec_reader::fetch_data_block(
           std::lower_bound(
             m_local_vertex_noise_distribution.begin(),
             m_local_vertex_noise_distribution.end(),
-            fast_random_uniform<double>(get_io_generator())));
+            random_uniform<double>(get_io_generator())));
         global_index = m_local_vertex_global_indices[local_index];
       } while (global_index == start_index);
       X(i,j) = static_cast<float>(global_index);
