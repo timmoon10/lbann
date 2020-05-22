@@ -111,7 +111,7 @@ private:
    *  entries in the cache. A random subset of the cache is
    *  regenerated whenever data samples are requested.
    */
-  std::vector<std::vector<size_t>> m_walks_cache;
+  std::deque<std::vector<size_t>> m_walks_cache;
 
   /** Number of times each local vertex has been visited in random
    *  walks.

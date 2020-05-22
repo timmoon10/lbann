@@ -136,26 +136,22 @@ bool node2vec_reader::fetch_data_block(
   if (thread_id != 0) { return true; }
   const size_t mb_size_ = mb_size;
 
-  // Function to compute random index in [0,max)
-  const auto rand_index = [](size_t max) -> size_t {
-    return fast_rand_int(get_io_generator(), max);
-  };
-
-  // Randomly update cache of random walks
-  // Note: The cache size is at least the local mini-batch size.
-  /// @todo Avoid overwriting new walks
+  // Perform random walks
   const auto contexts_per_walk = m_walk_length - m_walk_context_size + 1;
   auto num_walks = (mb_size_ + contexts_per_walk - 1) / contexts_per_walk;
-  num_walks = El::Max(num_walks, m_walks_cache.size() - mb_size_);
+  if (m_walks_cache.size() < mb_size_) {
+    num_walks = El::Max(num_walks, mb_size_ - m_walks_cache.size());
+  }
   num_walks = El::Max(num_walks, 1);
+  num_walks = El::Min(num_walks, mb_size_);
   auto walks = run_walker(num_walks);
+
+  // Update cache of random walks
   for (auto& walk : walks) {
-    if (m_walks_cache.size() < mb_size_) {
-      m_walks_cache.emplace_back(std::move(walk));
-    }
-    else {
-      m_walks_cache[rand_index(m_walks_cache.size())] = std::move(walk);
-    }
+    m_walks_cache.emplace_front(std::move(walk));
+  }
+  while (m_walks_cache.size() > mb_size_) {
+    m_walks_cache.pop_back();
   }
 
   // Recompute noise distribution if there are enough vertex visits
@@ -169,7 +165,8 @@ bool node2vec_reader::fetch_data_block(
 
     // Context window in random walk
     const auto cache_pos
-      = rand_index(contexts_per_walk*m_walks_cache.size());
+      = fast_rand_int(get_io_generator(),
+                      contexts_per_walk*m_walks_cache.size());
     const auto& walk = m_walks_cache[cache_pos / contexts_per_walk];
     const auto offset = cache_pos % contexts_per_walk;
     const auto start_index = walk[offset];
@@ -268,6 +265,9 @@ void node2vec_reader::load() {
 
   // Compute noise distribution for negative sampling
   compute_noise_distribution();
+
+  // Reset cache of random walks
+  m_walks_cache.clear();
 
   // Construct list of indices
   m_shuffled_indices.resize(graph.max_global_vertex_id()+1);

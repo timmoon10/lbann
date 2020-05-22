@@ -10,6 +10,8 @@ import data.data_readers
 import utils
 import utils.snap
 
+root_dir = os.path.dirname(os.path.realpath(__file__))
+
 # ----------------------------------
 # Options
 # ----------------------------------
@@ -24,44 +26,56 @@ parser.add_argument(
     '--mini-batch-size', action='store', default=256, type=int,
     help='mini-batch size (default: 256)', metavar='NUM')
 parser.add_argument(
-    '--num-epochs', action='store', default=10, type=int,
-    help='number of epochs (default: 10)', metavar='NUM')
+    '--num-epochs', action='store', default=100, type=int,
+    help='number of epochs (default: 100)', metavar='NUM')
 parser.add_argument(
     '--latent-dim', action='store', default=128, type=int,
     help='latent space dimensions (default: 128)', metavar='NUM')
 parser.add_argument(
     '--learning-rate', action='store', default=-1, type=float,
-    help='learning rate (default: 0.025*mbsize)', metavar='VAL')
+    help='learning rate (default: 0.25*mbsize)', metavar='VAL')
 parser.add_argument(
     '--work-dir', action='store', default=None, type=str,
     help='working directory', metavar='DIR')
 parser.add_argument(
     '--offline-walks', action='store_true',
     help='perform random walks offline')
+parser.add_argument(
+    '--disable-dist-embeddings', action='store_true',
+    help='disable distributed embedding layers')
 args = parser.parse_args()
 
 # Default learning rate
 # Note: Learning rate in original word2vec is 0.025
 if args.learning_rate < 0:
-    args.learning_rate = 0.025 * args.mini_batch_size
+    args.learning_rate = 0.25 * args.mini_batch_size
 
 # ----------------------------------
 # Create data reader
 # ----------------------------------
 
 # Properties for graph and random walk
-# Note: Use parameters from offline walk script
-import data.offline_walks
-graph_file = data.offline_walks.graph_file
-num_graph_nodes = data.offline_walks.max_graph_node_id() + 1
-walk_length = data.offline_walks.walk_context_size # data.offline_walks.walk_length
-return_param = data.offline_walks.return_param
-inout_param = data.offline_walks.inout_param
-walk_context_size = data.offline_walks.walk_context_size
-num_negative_samples = data.offline_walks.num_negative_samples
+graph_file = os.path.join(
+    root_dir, 'largescale_node2vec', 'evaluation', 'dataset',
+    'blog', 'edges_0based'
+)
+num_graph_nodes = 10312
+walk_length = 80
+return_param = 0.25
+inout_param = 0.25
+walk_context_size = 10
+num_negative_samples = 50
 
 # Construct data reader
 if args.offline_walks:
+    import data.offline_walks
+    graph_file = data.offline_walks.graph_file
+    num_graph_nodes = data.offline_walks.max_graph_node_id() + 1
+    walk_length = data.offline_walks.walk_length
+    return_param = data.offline_walks.return_param
+    inout_param = data.offline_walks.inout_param
+    walk_context_size = data.offline_walks.walk_context_size
+    num_negative_samples = data.offline_walks.num_negative_samples
     reader = data.data_readers.make_offline_data_reader()
 else:
     # Note: Before starting LBANN, we preprocess graph by ingesting
@@ -79,15 +93,11 @@ else:
 # Embedding weights
 # ----------------------------------
 
-encoder_embeddings_weights = lbann.Weights(
+embeddings_weights = lbann.Weights(
     initializer=lbann.NormalInitializer(
         mean=0, standard_deviation=1/args.latent_dim,
     ),
     name='embeddings',
-)
-decoder_embeddings_weights = lbann.Weights(
-    initializer=lbann.ConstantInitializer(value=0),
-    name='decoder_embeddings',
 )
 
 # ----------------------------------
@@ -97,33 +107,37 @@ decoder_embeddings_weights = lbann.Weights(
 # Embedding vectors, including negative sampling
 # Note: Input is sequence of graph node IDs
 input_ = lbann.Identity(lbann.Input())
-input_slice = lbann.Slice(
-    input_,
+if args.disable_dist_embeddings:
+    embeddings = lbann.Embedding(
+        input_,
+        weights=embeddings_weights,
+        num_embeddings=num_graph_nodes,
+        embedding_dim=args.latent_dim,
+    )
+else:
+    embeddings = lbann.DistEmbedding(
+        input_,
+        weights=embeddings_weights,
+        num_embeddings=num_graph_nodes,
+        embedding_dim=args.latent_dim,
+        sparse_sgd=True,
+        learning_rate=args.learning_rate,
+    )
+embeddings_slice = lbann.Slice(
+    embeddings,
+    axis=0,
     slice_points=f'0 {num_negative_samples+1} {num_negative_samples+walk_context_size}'
 )
-decoder_embeddings = lbann.DistEmbedding(
-    input_slice,
-    weights=decoder_embeddings_weights,
-    num_embeddings=num_graph_nodes,
-    embedding_dim=args.latent_dim,
-    sparse_sgd=True,
-    learning_rate=args.learning_rate,
-)
-encoder_embeddings = lbann.DistEmbedding(
-    input_slice,
-    weights=encoder_embeddings_weights,
-    num_embeddings=num_graph_nodes,
-    embedding_dim=args.latent_dim,
-    sparse_sgd=True,
-    learning_rate=args.learning_rate,
-)
+decoder_embeddings = lbann.Identity(embeddings_slice)
+encoder_embeddings = lbann.Identity(embeddings_slice)
 
 # Skip-Gram with negative sampling
 preds = lbann.MatMul(decoder_embeddings, encoder_embeddings, transpose_b=True)
 preds_slice = lbann.Slice(
     preds,
     axis=0,
-    slice_points=f'0 {num_negative_samples} {num_negative_samples+1}')
+    slice_points=f'0 {num_negative_samples} {num_negative_samples+1}',
+)
 preds_negative = lbann.Identity(preds_slice)
 preds_positive = lbann.Identity(preds_slice)
 obj_positive = lbann.LogSigmoid(preds_positive)
@@ -155,10 +169,12 @@ callbacks = [
                               epoch_interval=args.num_epochs),
     lbann.CallbackPrintModelDescription(),
 ]
-model = lbann.Model(args.num_epochs,
-                    layers=lbann.traverse_layer_graph(input_),
-                    objective_function=obj,
-                    callbacks=callbacks)
+model = lbann.Model(
+    args.num_epochs,
+    layers=lbann.traverse_layer_graph(input_),
+    objective_function=obj,
+    callbacks=callbacks,
+)
 
 # Create batch script
 kwargs = lbann.contrib.args.get_scheduler_kwargs(args)
@@ -171,7 +187,7 @@ script = lbann.contrib.launcher.make_batch_script(
 # Preprocess graph data with HavoqGT if needed
 if not args.offline_walks:
     ingest_graph_exe = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)),
+        root_dir,
         'build',
         'havoqgt',
         'src',
