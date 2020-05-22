@@ -3,7 +3,7 @@ import lbann
 
 def make_online_data_reader(
         graph_file,
-        backup_file=None,
+        epoch_size,
         walk_length=80,
         walk_context_size=10,
         return_param=0.25,
@@ -18,13 +18,13 @@ def make_online_data_reader(
     _reader.shuffle = True
     _reader.percent_of_data_to_use = 1.0
     _reader.node2vec.graph_file = graph_file
-    if backup_file:
-        _reader.node2vec.backup_file = backup_file
+    _reader.node2vec.epoch_size = epoch_size
     _reader.node2vec.walk_length = walk_length
     _reader.node2vec.return_param = return_param
     _reader.node2vec.inout_param = inout_param
     _reader.node2vec.walk_context_size = walk_context_size
     _reader.node2vec.num_negative_samples = num_negative_samples
+
     return reader
 
 def make_offline_data_reader():

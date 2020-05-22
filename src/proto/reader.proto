@@ -105,7 +105,7 @@ message PythonDataReader {
 
 message Node2VecDataReader {
   string graph_file = 1;
-  string backup_file = 2;
+  uint64 epoch_size = 2;
   uint64 walk_length = 3;
   double return_param = 4;
   double inout_param = 5;

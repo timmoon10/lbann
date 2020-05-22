@@ -26,8 +26,8 @@ parser.add_argument(
     '--mini-batch-size', action='store', default=256, type=int,
     help='mini-batch size (default: 256)', metavar='NUM')
 parser.add_argument(
-    '--num-epochs', action='store', default=100, type=int,
-    help='number of epochs (default: 100)', metavar='NUM')
+    '--num-iterations', action='store', default=1000, type=int,
+    help='number of epochs (default: 1000)', metavar='NUM')
 parser.add_argument(
     '--latent-dim', action='store', default=128, type=int,
     help='latent space dimensions (default: 128)', metavar='NUM')
@@ -54,22 +54,11 @@ if args.learning_rate < 0:
 # Create data reader
 # ----------------------------------
 
-# Properties for graph and random walk
-graph_file = os.path.join(
-    root_dir, 'largescale_node2vec', 'evaluation', 'dataset',
-    'blog', 'edges_0based'
-)
-num_graph_nodes = 10312
-walk_length = 80
-return_param = 0.25
-inout_param = 0.25
-walk_context_size = 10
-num_negative_samples = 50
-
 # Construct data reader
 if args.offline_walks:
     import data.offline_walks
     graph_file = data.offline_walks.graph_file
+    epoch_size = data.offline_walks.num_samples()
     num_graph_nodes = data.offline_walks.max_graph_node_id() + 1
     walk_length = data.offline_walks.walk_length
     return_param = data.offline_walks.return_param
@@ -78,11 +67,23 @@ if args.offline_walks:
     num_negative_samples = data.offline_walks.num_negative_samples
     reader = data.data_readers.make_offline_data_reader()
 else:
-    # Note: Before starting LBANN, we preprocess graph by ingesting
-    # with HavoqGT and writing distributed graph to shared memory.
+    # Note: Preprocess graph with HavoqGT and store in shared memory
+    # before starting LBANN.
+    graph_file = os.path.join(
+        root_dir, 'largescale_node2vec', 'evaluation', 'dataset',
+        'blog', 'edges_0based'
+    )
     distributed_graph_file = '/dev/shm/graph'
+    epoch_size = 100 * args.mini_batch_size
+    num_graph_nodes = 10312
+    walk_length = 80
+    return_param = 0.25
+    inout_param = 0.25
+    walk_context_size = 10
+    num_negative_samples = 50
     reader = data.data_readers.make_online_data_reader(
         graph_file=distributed_graph_file,
+        epoch_size=epoch_size,
         walk_context_size=walk_context_size,
         return_param=return_param,
         inout_param=inout_param,
@@ -158,6 +159,8 @@ obj = [
 opt = lbann.SGD(learn_rate=args.learning_rate)
 
 # Create LBANN objects
+iterations_per_epoch = utils.ceildiv(epoch_size, args.mini_batch_size)
+num_epochs = utils.ceildiv(args.num_iterations, iterations_per_epoch)
 trainer = lbann.Trainer(
     mini_batch_size=args.mini_batch_size,
     num_parallel_readers=0,
@@ -166,11 +169,11 @@ callbacks = [
     lbann.CallbackPrint(),
     lbann.CallbackTimer(),
     lbann.CallbackDumpWeights(basename='embeddings',
-                              epoch_interval=args.num_epochs),
+                              epoch_interval=num_epochs),
     lbann.CallbackPrintModelDescription(),
 ]
 model = lbann.Model(
-    args.num_epochs,
+    num_epochs,
     layers=lbann.traverse_layer_graph(input_),
     objective_function=obj,
     callbacks=callbacks,

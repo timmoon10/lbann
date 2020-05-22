@@ -75,7 +75,7 @@ namespace {
 
 node2vec_reader::node2vec_reader(
   std::string graph_file,
-  std::string backup_file,
+  size_t epoch_size,
   size_t walk_length,
   double return_param,
   double inout_param,
@@ -83,7 +83,7 @@ node2vec_reader::node2vec_reader(
   size_t num_negative_samples)
   : generic_data_reader(true),
     m_graph_file(std::move(graph_file)),
-    m_backup_file(std::move(backup_file)),
+    m_epoch_size{epoch_size},
     m_walk_length{walk_length},
     m_return_param{return_param},
     m_inout_param{inout_param},
@@ -147,10 +147,11 @@ bool node2vec_reader::fetch_data_block(
   auto walks = run_walker(num_walks);
 
   // Update cache of random walks
+  const size_t max_cache_size = El::Max(m_walks_cache.size(), mb_size_);
   for (auto& walk : walks) {
     m_walks_cache.emplace_front(std::move(walk));
   }
-  while (m_walks_cache.size() > mb_size_) {
+  while (m_walks_cache.size() > max_cache_size) {
     m_walks_cache.pop_back();
   }
 
@@ -200,13 +201,6 @@ bool node2vec_reader::fetch_label(CPUMat& Y, int data_id, int col) {
 
 void node2vec_reader::load() {
   auto& comm = *get_comm();
-
-  // Copy backup file if needed
-  if (!m_backup_file.empty()) {
-    ::havoqgt::distributed_db::transfer(
-      m_backup_file.c_str(),
-      m_graph_file.c_str());
-  }
 
   // Load graph data
   m_distributed_database = make_unique<DistributedDatabase>(
@@ -270,7 +264,7 @@ void node2vec_reader::load() {
   m_walks_cache.clear();
 
   // Construct list of indices
-  m_shuffled_indices.resize(graph.max_global_vertex_id()+1);
+  m_shuffled_indices.resize(m_epoch_size);
   std::iota(m_shuffled_indices.begin(), m_shuffled_indices.end(), 0);
   resize_shuffled_indices();
   select_subset_of_data();

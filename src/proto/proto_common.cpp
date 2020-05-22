@@ -313,7 +313,7 @@ void init_data_readers(
       const auto& params = readme.node2vec();
       reader = new node2vec_reader(
         params.graph_file(),
-        params.backup_file(),
+        params.epoch_size(),
         params.walk_length(),
         params.return_param(),
         params.inout_param(),
