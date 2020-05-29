@@ -42,7 +42,6 @@ namespace dist_embedding_layer_impl {
     size_t source_index{0};
     size_t target_rank{0};
     size_t target_index{0};
-    long is_completed{0};
     bool is_active{false};
   };
 
@@ -92,6 +91,8 @@ private:
 
   using RequestType = dist_embedding_layer_impl::vector_request;
 
+  void attach_embeddings_to_shmem_buffer();
+
   /** Size of dictionary of embeddings. */
   size_t m_num_embeddings;
   /** Size of embedding vectors. */
@@ -104,6 +105,17 @@ private:
   bool m_sparse_sgd;
   /** SGD learning rate. */
   DataType m_learning_rate;
+
+  /** SHMEM buffer for embedding vectors.
+   *
+   *  If the embedding weights matrix is not already attached to a
+   *  SHMEM buffer, then this layer allocates a SHMEM buffer and
+   *  attaches it. In this case, the layer is responsible for managing
+   *  the buffer.
+   */
+  TensorDataType* m_embeddings_buffer{nullptr};
+  /** Allocated size of @c m_embeddings_buffer. */
+  size_t m_embeddings_buffer_size{0};
 
   /** SHMEM buffer to communicate embedding vectors. */
   TensorDataType* m_workspace_buffer{nullptr};
@@ -253,6 +265,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data(size_t max_m
 
   // Setup embedding weights
   embeddings.setup();
+  attach_embeddings_to_shmem_buffer();
 
 }
 

@@ -129,7 +129,7 @@ inline void launch_nvshmem_collective_kernel(
 } // namespace <anon>
 
 // =============================================
-// Life cycle functions
+// Life cycle and setup
 // =============================================
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
@@ -142,6 +142,22 @@ dist_embedding_layer<TensorDataType,Layout,Device>::~dist_embedding_layer()
   if (m_requests_buffer != nullptr) {
     nvshmem_free(m_requests_buffer);
   }
+#endif // LBANN_HAS_NVSHMEM
+}
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+void dist_embedding_layer<TensorDataType,Layout,Device>::attach_embeddings_to_shmem_buffer() {
+#ifndef LBANN_HAS_NVSHMEM
+    LBANN_ERROR(
+    "dist_embedding_layer with ",
+    "(TensorDataType=",TypeName<TensorDataType>(),", ",
+    "Layout=",to_string(Layout),", ",
+    "Device=",to_string(Device),") ",
+    "requires NVSHMEM, but LBANN has not been built with NVSHMEM");
+  return;
+#else
+  /// @todo Implement
+  LBANN_ERROR("not yet implemented");
 #endif // LBANN_HAS_NVSHMEM
 }
 
