@@ -86,12 +86,17 @@ protected:
 
   void fp_compute() override;
   void bp_compute() override;
+  bool update_compute() override;
 
 private:
 
+  using LocalMat = El::Matrix<TensorDataType, Device>;
   using RequestType = dist_embedding_layer_impl::vector_request;
 
   void attach_embeddings_to_shmem_buffer();
+  void apply_sparse_sgd_step(
+    size_t num_gradients,
+    LocalMat& local_embeddings);
 
   /** Size of dictionary of embeddings. */
   size_t m_num_embeddings;
@@ -267,6 +272,21 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data(size_t max_m
   embeddings.setup();
   attach_embeddings_to_shmem_buffer();
 
+}
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+bool dist_embedding_layer<TensorDataType,Layout,Device>::update_compute() {
+
+  // Apply sparse SGD if needed
+  if (m_sparse_sgd) {
+    const size_t input_size = this->get_input_size();
+    const size_t mini_batch_size = this->get_prev_activations().Width();
+    auto& embeddings = this->get_data_type_weights(0).get_values();
+    auto& local_embeddings = dynamic_cast<LocalMat&>(embeddings.Matrix());
+    apply_sparse_sgd_step(input_size * mini_batch_size, local_embeddings);
+  }
+
+  return true;
 }
 
 // =============================================

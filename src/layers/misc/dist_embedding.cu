@@ -338,7 +338,6 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
 #else // LBANN_HAS_NVSHMEM
 
   // Data matrices
-  using LocalMat = El::Matrix<TensorDataType, Device>;
   const auto& embeddings = this->get_data_type_weights(0).get_values();
   const auto& input = this->get_prev_activations();
   const auto& local_input = dynamic_cast<const LocalMat&>(input.LockedMatrix());
@@ -508,6 +507,101 @@ __global__ void send_gradients_kernel(
 }
 #endif // LBANN_HAS_NVSHMEM
 
+} // namespace <anon>
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
+#ifndef LBANN_HAS_NVSHMEM
+  LBANN_ERROR(
+    "dist_embedding_layer with ",
+    "(TensorDataType=",TypeName<TensorDataType>(),", ",
+    "Layout=",to_string(Layout),", ",
+    "Device=",to_string(Device),") ",
+    "requires NVSHMEM, but LBANN has not been built with NVSHMEM");
+  return;
+#else // LBANN_HAS_NVSHMEM
+
+  // Data matrices
+  const auto& input = this->get_prev_activations();
+  const auto& local_output_grad = dynamic_cast<const LocalMat&>(this->get_local_prev_error_signals());
+
+  // Dimensions
+  const size_t input_size = this->get_input_size();
+  const size_t mini_batch_size = input.Width();
+  const size_t local_mini_batch_size = local_output_grad.Width();
+
+  // GPU objects
+  auto&& stream = El::GPUManager::Stream();
+
+  // SHMEM processing element
+  const size_t rank = this->get_comm()->get_rank_in_trainer();
+
+  // Initialize NVSHMEM buffer for gradient w.r.t. embeddings
+  LocalMat workspace(
+    m_embedding_dim,
+    input_size * mini_batch_size,
+    m_workspace_buffer,
+    m_embedding_dim);
+
+  // Send gradients to owner processes
+  if (!local_output_grad.IsEmpty()) {
+    constexpr size_t block_size = 32;
+    dim3 block_dims, grid_dims;
+    block_dims.x = block_size;
+    grid_dims.x = input_size;
+    grid_dims.y = local_mini_batch_size;
+    launch_cuda_kernel(
+      send_gradients_kernel<TensorDataType>,
+      grid_dims,
+      block_dims,
+      0,
+      stream,
+      m_embedding_dim,
+      Size2{local_mini_batch_size, input_size},
+      local_output_grad.LockedBuffer(),
+      Size2{size_t(local_output_grad.LDim()), 1},
+      m_requests_buffer,
+      Size2{input_size, 1},
+      workspace.Buffer(),
+      Size2{size_t(workspace.LDim()), 1},
+      size_t(input.RowShift()),
+      size_t(input.RowStride()));
+  }
+  nvshmemx_barrier_all_on_stream(stream);
+
+  // Use dense optimizer if needed
+  if (!m_sparse_sgd) {
+
+    // Create buffer for dense gradients
+    auto& embeddings = this->get_data_type_weights(0).get_values();
+    std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> embeddings_grad(
+      embeddings.Construct(embeddings.Grid(), embeddings.Root()));
+    embeddings_grad->AlignWith(embeddings);
+    El::Zeros(*embeddings_grad, embeddings.Height(), embeddings.Width());
+    auto& local_embeddings_grad = dynamic_cast<LocalMat&>(embeddings_grad->Matrix());
+
+    // Apply SGD step to convert sparse gradients to dense gradients
+    apply_sparse_sgd_step(
+      input_size * mini_batch_size,
+      local_embeddings_grad);
+
+    // Send dense gradients to dense optimizer
+    auto&& opt = this->get_data_type_weights(0).get_optimizer();
+    if (opt != nullptr) {
+      opt->add_to_gradient(*embeddings_grad);
+    }
+
+  }
+
+#endif // LBANN_HAS_NVSHMEM
+}
+
+// =============================================
+// Sparse SGD
+// =============================================
+
+namespace {
+
 #ifdef LBANN_HAS_NVSHMEM
 /** Sparse SGD on local embeddings.
  *
@@ -558,7 +652,9 @@ __global__ void sgd_kernel(
 } // namespace <anon>
 
 template <typename TensorDataType, data_layout Layout, El::Device Device>
-void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
+void dist_embedding_layer<TensorDataType,Layout,Device>::apply_sparse_sgd_step(
+  size_t num_gradients,
+  LocalMat& local_embeddings) {
 #ifndef LBANN_HAS_NVSHMEM
   LBANN_ERROR(
     "dist_embedding_layer with ",
@@ -569,101 +665,37 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   return;
 #else // LBANN_HAS_NVSHMEM
 
-  // Data matrices
-  using LocalMat = El::Matrix<TensorDataType, Device>;
-  auto& embeddings = this->get_data_type_weights(0).get_values();
-  auto& local_embeddings = dynamic_cast<LocalMat&>(embeddings.Matrix());
-  const auto& input = this->get_prev_activations();
-  const auto& local_output_grad = dynamic_cast<const LocalMat&>(this->get_local_prev_error_signals());
-
-  // Dimensions
-  const size_t input_size = this->get_input_size();
-  const size_t mini_batch_size = input.Width();
-  const size_t local_mini_batch_size = local_output_grad.Width();
-
   // GPU objects
   auto&& stream = El::GPUManager::Stream();
 
   // SHMEM processing element
   const size_t rank = this->get_comm()->get_rank_in_trainer();
 
-  // Initialize NVSHMEM buffer for gradient w.r.t. embeddings
-  LocalMat workspace(
+  // Initialize SHMEM buffer for gradient w.r.t. embeddings
+  LocalMat local_embeddings_grad(
     m_embedding_dim,
-    input_size * mini_batch_size,
+    num_gradients,
     m_workspace_buffer,
     m_embedding_dim);
 
-  // Send gradients to owner processes
-  if (!local_output_grad.IsEmpty()) {
-    constexpr size_t block_size = 32;
-    dim3 block_dims, grid_dims;
-    block_dims.x = block_size;
-    grid_dims.x = input_size;
-    grid_dims.y = local_mini_batch_size;
-    launch_cuda_kernel(
-      send_gradients_kernel<TensorDataType>,
-      grid_dims,
-      block_dims,
-      0,
-      stream,
-      m_embedding_dim,
-      Size2{local_mini_batch_size, input_size},
-      local_output_grad.LockedBuffer(),
-      Size2{size_t(local_output_grad.LDim()), 1},
-      m_requests_buffer,
-      Size2{input_size, 1},
-      workspace.Buffer(),
-      Size2{size_t(workspace.LDim()), 1},
-      size_t(input.RowShift()),
-      size_t(input.RowStride()));
-  }
-  nvshmemx_barrier_all_on_stream(stream);
-
-  // Configure local embeddings for sparse SGD
-  // Note: If we are not doing sparse SGD, then we initialize
-  // embeddings_v as a tensor of zeros. Applying sparse SGD to this
-  // tensor results in the full gradient tensor, which can then be
-  // sent to a dense optimizer.
-  LocalMat local_embeddings_v;
-  std::unique_ptr<El::AbstractDistMatrix<TensorDataType>> embeddings_grad;
-  if (m_sparse_sgd) {
-    El::View(local_embeddings_v, local_embeddings);
-  }
-  else {
-    embeddings_grad.reset(
-      embeddings.Construct(embeddings.Grid(), embeddings.Root()));
-    embeddings_grad->AlignWith(embeddings);
-    El::Zeros(*embeddings_grad, embeddings.Height(), embeddings.Width());
-    El::View(local_embeddings_v, embeddings_grad->Matrix());
-  }
-
   // Sparse SGD on local embeddings
-  {
-    constexpr size_t block_size = 32;
-    const size_t grid_size = input_size * mini_batch_size;
-    launch_cuda_kernel(
-      sgd_kernel<TensorDataType>,
-      grid_size,
-      block_size,
-      0,
-      stream,
-      m_learning_rate,
-      m_embedding_dim,
-      input_size * mini_batch_size,
-      m_requests_buffer,
-      workspace.LockedBuffer(),
-      Size2{size_t(workspace.LDim()), 1},
-      local_embeddings_v.Buffer(),
-      Size2{size_t(local_embeddings_v.LDim()), 1},
-      rank);
-  }
-
-  // Send gradients to dense optimizer if needed
-  auto&& opt = this->get_data_type_weights(0).get_optimizer();
-  if (!m_sparse_sgd && opt != nullptr) {
-    opt->add_to_gradient(*embeddings_grad);
-  }
+  constexpr size_t block_size = 32;
+  const size_t grid_size = num_gradients;
+  launch_cuda_kernel(
+    sgd_kernel<TensorDataType>,
+    grid_size,
+    block_size,
+    0,
+    stream,
+    m_learning_rate,
+    m_embedding_dim,
+    num_gradients,
+    m_requests_buffer,
+    local_embeddings_grad.LockedBuffer(),
+    Size2{size_t(local_embeddings_grad.LDim()), 1},
+    local_embeddings.Buffer(),
+    Size2{size_t(local_embeddings.LDim()), 1},
+    rank);
 
 #endif // LBANN_HAS_NVSHMEM
 }
