@@ -36,7 +36,7 @@ namespace lbann {
 
 namespace {
 
-using RequestType = dist_embedding_layer_impl::vector_request;
+using MetadataType = dist_embedding_layer_impl::vector_metadata;
 using Size2 = cuda::array<size_t, 2>;
 
 /// @todo This would be fun to optimize further.
@@ -142,8 +142,8 @@ dist_embedding_layer<TensorDataType,Layout,Device>::~dist_embedding_layer()
   if (m_workspace_buffer != nullptr) {
     nvshmem_free(m_workspace_buffer);
   }
-  if (m_requests_buffer != nullptr) {
-    nvshmem_free(m_requests_buffer);
+  if (m_metadata_buffer != nullptr) {
+    nvshmem_free(m_metadata_buffer);
   }
 #endif // LBANN_HAS_NVSHMEM
 }
@@ -227,8 +227,8 @@ __global__ void request_embeddings_kernel(
   Size2 input_strides,
   const TensorDataType* __restrict__ embeddings,
   Size2 embeddings_strides,
-  RequestType* __restrict__ requests,
-  Size2 requests_strides,
+  MetadataType* __restrict__ metadata,
+  Size2 metadata_strides,
   TensorDataType* __restrict__ workspace,
   Size2 workspace_strides,
   size_t rank,
@@ -255,24 +255,24 @@ __global__ void request_embeddings_kernel(
       const auto& global_index = static_cast<size_t>(cuda::floor(global_index_float));
 
       // Figure out which process owns embedding vector
-      __shared__ unsigned char req_buffer[sizeof(RequestType)];
-      auto& req = *reinterpret_cast<RequestType*>(req_buffer);
+      __shared__ unsigned char metadata_shared[sizeof(MetadataType)];
+      auto& m = *reinterpret_cast<MetadataType*>(metadata_shared);
       if (threadIdx.x == 0) {
-        req.source_rank = distmat_index_owner(global_index, embeddings_rowalign, embeddings_rowstride);
-        req.source_index = distmat_local_index(global_index, req.source_rank, embeddings_rowalign, embeddings_rowstride);
-        req.target_rank = rank;
-        req.target_index = i + global_j*input_dims[1];
-        req.is_active = true;
-        requests[i*requests_strides[1] + global_j*requests_strides[0]] = req;
+        m.source_rank = distmat_index_owner(global_index, embeddings_rowalign, embeddings_rowstride);
+        m.source_index = distmat_local_index(global_index, m.source_rank, embeddings_rowalign, embeddings_rowstride);
+        m.target_rank = rank;
+        m.target_index = i + global_j*input_dims[1];
+        m.is_active = true;
+        metadata[i*metadata_strides[1] + global_j*metadata_strides[0]] = m;
       }
       __syncwarp();
 
       // Get embedding vector from owner process
       nvshmemx_getmem_nbi_warp(
-        &workspace[req.target_index * workspace_strides[0]],
-        &embeddings[req.source_index * embeddings_strides[0]],
+        &workspace[m.target_index * workspace_strides[0]],
+        &embeddings[m.source_index * embeddings_strides[0]],
         embedding_dim*sizeof(TensorDataType),
-        req.source_rank);
+        m.source_rank);
 
     }
   }
@@ -291,8 +291,8 @@ template <typename TensorDataType>
 __global__ void copy_embeddings_kernel(
   size_t embedding_dim,
   Size2 input_dims,
-  const RequestType* __restrict__ requests,
-  Size2 requests_strides,
+  const MetadataType* __restrict__ metadata,
+  Size2 metadata_strides,
   const TensorDataType* __restrict__ workspace,
   Size2 workspace_strides,
   TensorDataType* __restrict__ output,
@@ -312,10 +312,10 @@ __global__ void copy_embeddings_kernel(
   for (size_t j = bidy; j < input_dims[0]; j += nblocksy) {
     for (size_t i = i_start; i < i_end; ++i) {
       const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
-      const auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
+      const auto& m = metadata[i*metadata_strides[1] + global_j*metadata_strides[0]];
       memcpy_warp(
         &output[i*embedding_dim + j*output_strides[0]],
-        &workspace[req.target_index * workspace_strides[0]],
+        &workspace[m.target_index * workspace_strides[0]],
         embedding_dim);
     }
   }
@@ -354,11 +354,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   nvshmem::initialize();
 
   // Barrier to handle gradient checking
-  // Note: Gradient checking changes embedding values outside this
-  // layer, so we need to synchronize to make sure embeddings are
-  // ready for communication.
   /// @todo Think of a way to avoid this synchronization
-  // nvshmemx_barrier_all_on_stream(stream);
+  if (dist_embedding_layer_impl::barrier_for_grad_check) {
+    nvshmemx_barrier_all_on_stream(stream);
+  }
 
   // Synchronize non-blocking barrier
   // Note: Make sure embeddings are up-to-date and NVSHMEM workspaces
@@ -366,7 +365,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   auto& comm = *this->get_comm();
   comm.wait(m_nb_barrier_request);
 
-  // Initialize NVSHMEM buffer for embedding vectors
+  // Initialize NVSHMEM buffer for communicating embedding vectors
   if (m_workspace_buffer_size < output_size * mini_batch_size) {
     m_workspace_buffer_size = output_size * mini_batch_size;
     m_workspace_buffer = nvshmem::realloc(m_workspace_buffer,
@@ -378,17 +377,17 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
     m_workspace_buffer,
     m_embedding_dim);
 
-  // Initialize NVSHMEM buffer for vector requests
-  if (m_requests_buffer_size < input_size * mini_batch_size) {
-    m_requests_buffer_size = input_size * mini_batch_size;
-    m_requests_buffer = nvshmem::realloc(m_requests_buffer,
-                                         m_requests_buffer_size);
+  // Initialize NVSHMEM buffer for embedding vector metadata
+  if (m_metadata_buffer_size < input_size * mini_batch_size) {
+    m_metadata_buffer_size = input_size * mini_batch_size;
+    m_metadata_buffer = nvshmem::realloc(m_metadata_buffer,
+                                         m_metadata_buffer_size);
   }
   CHECK_CUDA(
     cudaMemsetAsync(
-      m_requests_buffer,
+      m_metadata_buffer,
       0,
-      m_requests_buffer_size*sizeof(RequestType),
+      m_metadata_buffer_size*sizeof(MetadataType),
       stream));
 
   // Request embedding vectors from owning processes
@@ -411,7 +410,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
       Size2{size_t(local_input.LDim()), 1},
       embeddings.LockedBuffer(),
       Size2{size_t(embeddings.LDim()), 1},
-      m_requests_buffer,
+      m_metadata_buffer,
       Size2{input_size, 1},
       workspace.Buffer(),
       Size2{size_t(workspace.LDim()), 1},
@@ -438,7 +437,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
       stream,
       m_embedding_dim,
       Size2{local_mini_batch_size, input_size},
-      m_requests_buffer,
+      m_metadata_buffer,
       Size2{input_size, 1},
       workspace.LockedBuffer(),
       Size2{size_t(workspace.LDim()), 1},
@@ -474,8 +473,8 @@ __global__ void send_gradients_kernel(
   Size2 input_dims,
   const TensorDataType* __restrict__ output_grad,
   Size2 output_grad_strides,
-  RequestType* __restrict__ requests,
-  Size2 requests_strides,
+  MetadataType* __restrict__ metadata,
+  Size2 metadata_strides,
   TensorDataType* __restrict__ workspace,
   Size2 workspace_strides,
   size_t input_rowshift,
@@ -487,7 +486,7 @@ __global__ void send_gradients_kernel(
   const size_t nblocksx = gridDim.x;
   const size_t nblocksy = gridDim.y;
 
-  // Assign requests to CUDA blocks
+  // Assign metadata to CUDA blocks
   const size_t i_per_block = (input_dims[1] + nblocksx - 1) / nblocksx;
   const size_t i_start = bidx * i_per_block;
   const size_t i_end = cuda::min((bidx+1) * i_per_block, input_dims[1]);
@@ -496,23 +495,23 @@ __global__ void send_gradients_kernel(
   for (size_t j = bidy; j < input_dims[0]; j += nblocksy) {
     for (size_t i = i_start; i < i_end; ++i) {
       const auto& global_j = distmat_global_index(j, input_rowshift, input_rowstride);
-      auto& req = requests[i*requests_strides[1] + global_j*requests_strides[0]];
-      auto* workspace_ptr = &workspace[req.target_index * workspace_strides[0]];
+      auto& m = metadata[i*metadata_strides[1] + global_j*metadata_strides[0]];
+      auto* workspace_ptr = &workspace[m.target_index * workspace_strides[0]];
       memcpy_warp(
         workspace_ptr,
         &output_grad[i*embedding_dim + j*output_grad_strides[0]],
         embedding_dim);
-      if (req.source_rank != req.target_rank) {
-        nvshmemx_putmem_nbi_warp(
-          &req,
-          &req,
-          sizeof(RequestType),
-          req.source_rank);
+      if (m.source_rank != m.target_rank) {
         nvshmemx_putmem_nbi_warp(
           workspace_ptr,
           workspace_ptr,
           embedding_dim*sizeof(TensorDataType),
-          req.source_rank);
+          m.source_rank);
+        nvshmemx_putmem_nbi_warp(
+          &m,
+          &m,
+          sizeof(MetadataType),
+          m.source_rank);
       }
     }
   }
@@ -575,7 +574,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
       Size2{local_mini_batch_size, input_size},
       local_output_grad.LockedBuffer(),
       Size2{size_t(local_output_grad.LDim()), 1},
-      m_requests_buffer,
+      m_metadata_buffer,
       Size2{input_size, 1},
       workspace.Buffer(),
       Size2{size_t(workspace.LDim()), 1},
@@ -632,10 +631,10 @@ template <typename TensorDataType>
 __global__ void sgd_kernel(
   TensorDataType learning_rate,
   size_t embedding_dim,
-  size_t num_requests,
-  const RequestType* __restrict__ requests,
-  const TensorDataType* __restrict__ workspace,
-  Size2 workspace_strides,
+  size_t num_gradients,
+  const MetadataType* __restrict__ metadata,
+  const TensorDataType* __restrict__ embeddings_grad,
+  Size2 embeddings_grad_strides,
   TensorDataType* __restrict__ embeddings,
   Size2 embeddings_strides,
   size_t rank) {
@@ -647,17 +646,17 @@ __global__ void sgd_kernel(
   constexpr size_t warp_size = 32;
 
   // Assign requests to CUDA blocks
-  const size_t requests_per_block = (num_requests + nblocks - 1) / nblocks;
-  const size_t i_start = bid * requests_per_block;
-  const size_t i_end = cuda::min((bid+1) * requests_per_block, num_requests);
+  const size_t gradients_per_block = (num_gradients + nblocks - 1) / nblocks;
+  const size_t i_start = bid * gradients_per_block;
+  const size_t i_end = cuda::min((bid+1) * gradients_per_block, num_gradients);
 
   for (size_t i = i_start; i < i_end; ++i) {
-    const auto& req = requests[i];
-    if (req.is_active && req.source_rank == rank) {
+    const auto& m = metadata[i];
+    if (m.is_active && m.source_rank == rank) {
 
       // Update embedding vector with gradient
-      const auto* __restrict__ dw = &workspace[req.target_index * workspace_strides[0]];
-      auto* __restrict__ w = &embeddings[req.source_index * embeddings_strides[0]];
+      const auto* __restrict__ dw = &embeddings_grad[m.target_index * embeddings_grad_strides[0]];
+      auto* __restrict__ w = &embeddings[m.source_index * embeddings_strides[0]];
       for (size_t k = tid; k < embedding_dim; k += warp_size) {
         cuda::atomic_add(&w[k], -learning_rate * dw[k]);
       }
@@ -712,7 +711,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::apply_sparse_sgd_step(
     m_learning_rate,
     m_embedding_dim,
     num_gradients,
-    m_requests_buffer,
+    m_metadata_buffer,
     local_embeddings_grad.LockedBuffer(),
     Size2{size_t(local_embeddings_grad.LDim()), 1},
     local_embeddings.Buffer(),

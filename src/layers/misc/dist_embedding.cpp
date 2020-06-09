@@ -51,7 +51,7 @@ dist_embedding_layer<TensorDataType,Layout,Device>::~dist_embedding_layer()
 #ifdef LBANN_HAS_SHMEM
   shmem_free(m_embeddings_buffer);
   shmem_free(m_workspace_buffer);
-  shmem_free(m_requests_buffer);
+  shmem_free(m_metadata_buffer);
 #endif // LBANN_HAS_SHMEM
 }
 
@@ -144,11 +144,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   const size_t local_mini_batch_size = local_input.Width();
 
   // Barrier to handle gradient checking
-  // Note: Gradient checking changes embedding values outside this
-  // layer, so we need to synchronize to make sure embeddings are
-  // ready for communication.
   /// @todo Think of a way to avoid this synchronization
-  // shmem_barrier_all();
+  if (dist_embedding_layer_impl::barrier_for_grad_check) {
+    shmem_barrier_all();
+  }
 
   // Synchronize non-blocking barrier
   // Note: Make sure embeddings are up-to-date and SHMEM workspaces
@@ -156,13 +155,13 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   auto& comm = *this->get_comm();
   comm.wait(m_nb_barrier_request);
 
-  // Initialize SHMEM buffer for embedding vectors
+  // Initialize SHMEM buffer for communicating embedding vectors
   if (m_workspace_buffer_size < output_size * mini_batch_size) {
     m_workspace_buffer_size = output_size * mini_batch_size;
     m_workspace_buffer = reinterpret_cast<TensorDataType*>(
       shmem_realloc(
         m_workspace_buffer,
-        m_workspace_buffer_size*sizeof(RequestType)
+        m_workspace_buffer_size*sizeof(MetadataType)
         )
       );
   }
@@ -172,19 +171,19 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
     m_workspace_buffer,
     m_embedding_dim);
 
-  // Initialize SHMEM buffer for vector requests
-  if (m_requests_buffer_size < input_size * mini_batch_size) {
-    m_requests_buffer_size = input_size * mini_batch_size;
-    m_requests_buffer = reinterpret_cast<RequestType*>(
+  // Initialize SHMEM buffer for embedding vector metadata
+  if (m_metadata_buffer_size < input_size * mini_batch_size) {
+    m_metadata_buffer_size = input_size * mini_batch_size;
+    m_metadata_buffer = reinterpret_cast<MetadataType*>(
       shmem_realloc(
-        m_requests_buffer,
-        m_requests_buffer_size*sizeof(RequestType))
+        m_metadata_buffer,
+        m_metadata_buffer_size*sizeof(MetadataType))
       );
   }
   std::fill(
-    m_requests_buffer,
-    m_requests_buffer+m_requests_buffer_size,
-    RequestType());
+    m_metadata_buffer,
+    m_metadata_buffer+m_metadata_buffer_size,
+    MetadataType());
 
   // Get embedding vectors from owner processes
   const size_t rank = comm.get_rank_in_trainer();
@@ -194,19 +193,19 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
       const auto& global_j = input.GlobalCol(j);
 
       // Figure out which process owns embedding vector
-      auto& req = m_requests_buffer[i + global_j*input_size];
-      req.source_rank = embeddings.Owner(0, global_index);
-      req.source_index = embeddings.LocalCol(global_index, req.source_rank);
-      req.target_rank = rank;
-      req.target_index = i + global_j*input_size;
-      req.is_active = true;
+      auto& m = m_metadata_buffer[i + global_j*input_size];
+      m.source_rank = embeddings.Owner(0, global_index);
+      m.source_index = embeddings.LocalCol(global_index, m.source_rank);
+      m.target_rank = rank;
+      m.target_index = i + global_j*input_size;
+      m.is_active = true;
 
       // Get embedding vector from owner process
       shmem_getmem_nbi(
-        workspace.Buffer(0, req.target_index),
-        embeddings.LockedBuffer(0, req.source_index),
+        workspace.Buffer(0, m.target_index),
+        embeddings.LockedBuffer(0, m.source_index),
         m_embedding_dim*sizeof(TensorDataType),
-        req.source_rank);
+        m.source_rank);
 
     }
   }
@@ -270,17 +269,17 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   for (size_t j=0; j<local_mini_batch_size; ++j) {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_j = input.GlobalCol(j);
-      auto& req = m_requests_buffer[i + global_j*input_size];
+      auto& m = m_metadata_buffer[i + global_j*input_size];
       shmem_putmem_nbi(
         workspace.Buffer(0, i+global_j*input_size),
         local_output_grad.LockedBuffer(i*m_embedding_dim, j),
         m_embedding_dim*sizeof(TensorDataType),
-        req.source_rank);
+        m.source_rank);
       shmem_putmem_nbi(
-        &req,
-        &req,
-        sizeof(RequestType),
-        req.source_rank);
+        &m,
+        &m,
+        sizeof(MetadataType),
+        m.source_rank);
     }
   }
   shmem_quiet();
@@ -356,13 +355,13 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::apply_sparse_sgd_step(
     const size_t index_start = thread * embeddings_per_thread;
     const size_t index_end = (thread+1) * embeddings_per_thread;
     for (size_t i=0; i<num_gradients; ++i) {
-      const auto& req = m_requests_buffer[i];
-      if (req.is_active
-          && req.source_rank == rank
-          && index_start <= req.source_index
-          && req.source_index < index_end) {
-        const auto* dw = local_embeddings_grad.LockedBuffer(0, req.target_index);
-        auto* w = local_embeddings.Buffer(0, req.source_index);
+      const auto& m = m_metadata_buffer[i];
+      if (m.is_active
+          && m.source_rank == rank
+          && index_start <= m.source_index
+          && m.source_index < index_end) {
+        const auto* dw = local_embeddings_grad.LockedBuffer(0, m.target_index);
+        auto* w = local_embeddings.Buffer(0, m.source_index);
         EL_SIMD
         for (size_t k = 0; k < m_embedding_dim; ++k) {
           w[k] -= m_learning_rate * dw[k];

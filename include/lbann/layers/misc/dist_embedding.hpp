@@ -36,14 +36,26 @@ namespace lbann {
 
 namespace dist_embedding_layer_impl {
 
-  /** Request for an embedding vector from a remote process. */
-  struct vector_request {
+  /** Metadata for an embedding vector from a remote process. */
+  struct vector_metadata {
     size_t source_rank{0};
     size_t source_index{0};
     size_t target_rank{0};
     size_t target_index{0};
     bool is_active{false};
   };
+
+  /**
+   *  @c dist_embedding_layer carefully uses non-blocking barriers to
+   *  ensure the correctness of asynchronous communication. However,
+   *  gradient checking changes the embedding values without
+   *  performing any synchronization. The quickest fix is to do a
+   *  blocking barrier at the beginning of forward prop to make sure
+   *  that all the embeddings are ready to be accessed.
+   *
+   *  @todo Think of a way to avoid this synchronization.
+   */
+  constexpr bool barrier_for_grad_check = false;
 
 } // namespace dist_embedding_layer_impl
 
@@ -91,8 +103,7 @@ protected:
 private:
 
   using LocalMat = El::Matrix<TensorDataType, Device>;
-  /// @todo Rename this something other than "request"
-  using RequestType = dist_embedding_layer_impl::vector_request;
+  using MetadataType = dist_embedding_layer_impl::vector_metadata;
 
   /** @brief Non-blocking barrier
    *  @todo Handle case with non-default CUDA stream.
@@ -137,10 +148,10 @@ private:
   /** Allocated size of @c m_workspace_buffer. */
   size_t m_workspace_buffer_size{0};
 
-  /** SHMEM buffer to communicate requests for embedding vectors. */
-  RequestType* m_requests_buffer{nullptr};
-  /** Allocated size of @c m_requests_buffer. */
-  size_t m_requests_buffer_size{0};
+  /** SHMEM buffer to communicate metadata for embedding vectors. */
+  MetadataType* m_metadata_buffer{nullptr};
+  /** Allocated size of @c m_metadata_buffer. */
+  size_t m_metadata_buffer_size{0};
 
   /** Request to synchronize non-blocking barriers. */
   Al::request m_nb_barrier_request;
