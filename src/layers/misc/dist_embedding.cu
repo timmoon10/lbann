@@ -176,7 +176,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::attach_embeddings_to_sh
   }
 #endif
 
-  // Calculate size of SHMEM buffer
+  // Calculate size of NVSHMEM buffer
   const auto col_comm_size = El::mpi::Size(embeddings.ColComm());
   const auto row_comm_size = El::mpi::Size(embeddings.RowComm());
   const auto height = embeddings.Height();
@@ -353,8 +353,18 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   auto&& stream = El::GPUManager::Stream();
   nvshmem::initialize();
 
-  // SHMEM processing element
-  const size_t rank = this->get_comm()->get_rank_in_trainer();
+  // Barrier to handle gradient checking
+  // Note: Gradient checking changes embedding values outside this
+  // layer, so we need to synchronize to make sure embeddings are
+  // ready for communication.
+  /// @todo Think of a way to avoid this synchronization
+  // nvshmemx_barrier_all_on_stream(stream);
+
+  // Synchronize non-blocking barrier
+  // Note: Make sure embeddings are up-to-date and NVSHMEM workspaces
+  // are safe to reset.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
 
   // Initialize NVSHMEM buffer for embedding vectors
   if (m_workspace_buffer_size < output_size * mini_batch_size) {
@@ -369,7 +379,6 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
     m_embedding_dim);
 
   // Initialize NVSHMEM buffer for vector requests
-  /// @todo Smarter synchronization
   if (m_requests_buffer_size < input_size * mini_batch_size) {
     m_requests_buffer_size = input_size * mini_batch_size;
     m_requests_buffer = nvshmem::realloc(m_requests_buffer,
@@ -381,9 +390,9 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
       0,
       m_requests_buffer_size*sizeof(RequestType),
       stream));
-  nvshmemx_barrier_all_on_stream(stream);
 
   // Request embedding vectors from owning processes
+  const size_t rank = comm.get_rank_in_trainer();
   if (!local_input.IsEmpty()) {
     constexpr size_t block_size = 32;
     dim3 block_dims, grid_dims;
@@ -438,6 +447,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
       size_t(input.RowShift()),
       size_t(input.RowStride()));
   }
+
+  // Non-blocking barrier
+  // Note: NVSHMEM workspaces are ready to recieve gradients.
+  nb_barrier(comm, comm.get_trainer_comm(), m_nb_barrier_request);
 
 #endif // LBANN_HAS_NVSHMEM
 }
@@ -533,8 +546,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   // GPU objects
   auto&& stream = El::GPUManager::Stream();
 
-  // SHMEM processing element
-  const size_t rank = this->get_comm()->get_rank_in_trainer();
+  // Synchronize non-blocking barrier
+  // Note: Make sure NVSHMEM workspaces are ready to recieve gradients.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
 
   // Initialize NVSHMEM buffer for gradient w.r.t. embeddings
   LocalMat workspace(
@@ -567,7 +582,11 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
       size_t(input.RowShift()),
       size_t(input.RowStride()));
   }
-  nvshmemx_barrier_all_on_stream(stream);
+  nvshmemx_quiet_on_stream(stream);
+
+  // Non-blocking barrier
+  // Note: Gradients have been sent.
+  nb_barrier(comm, comm.get_trainer_comm(), m_nb_barrier_request);
 
   // Use dense optimizer if needed
   if (!m_sparse_sgd) {
@@ -668,8 +687,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::apply_sparse_sgd_step(
   // GPU objects
   auto&& stream = El::GPUManager::Stream();
 
-  // SHMEM processing element
-  const size_t rank = this->get_comm()->get_rank_in_trainer();
+  // Synchronize non-blocking barrier
+  // Note: Make sure gradients have been received.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
 
   // Initialize SHMEM buffer for gradient w.r.t. embeddings
   LocalMat local_embeddings_grad(
@@ -679,6 +700,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::apply_sparse_sgd_step(
     m_embedding_dim);
 
   // Sparse SGD on local embeddings
+  const size_t rank = comm.get_rank_in_trainer();
   constexpr size_t block_size = 32;
   const size_t grid_size = num_gradients;
   launch_cuda_kernel(

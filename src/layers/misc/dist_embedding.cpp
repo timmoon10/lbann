@@ -143,8 +143,18 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
   const size_t mini_batch_size = input.Width();
   const size_t local_mini_batch_size = local_input.Width();
 
-  // SHMEM processing element
-  const size_t rank = this->get_comm()->get_rank_in_trainer();
+  // Barrier to handle gradient checking
+  // Note: Gradient checking changes embedding values outside this
+  // layer, so we need to synchronize to make sure embeddings are
+  // ready for communication.
+  /// @todo Think of a way to avoid this synchronization
+  // shmem_barrier_all();
+
+  // Synchronize non-blocking barrier
+  // Note: Make sure embeddings are up-to-date and SHMEM workspaces
+  // are safe to reset.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
 
   // Initialize SHMEM buffer for embedding vectors
   if (m_workspace_buffer_size < output_size * mini_batch_size) {
@@ -163,7 +173,6 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
     m_embedding_dim);
 
   // Initialize SHMEM buffer for vector requests
-  /// @todo Smarter synchronization
   if (m_requests_buffer_size < input_size * mini_batch_size) {
     m_requests_buffer_size = input_size * mini_batch_size;
     m_requests_buffer = reinterpret_cast<RequestType*>(
@@ -176,9 +185,9 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
     m_requests_buffer,
     m_requests_buffer+m_requests_buffer_size,
     RequestType());
-  shmem_barrier_all();
 
   // Get embedding vectors from owner processes
+  const size_t rank = comm.get_rank_in_trainer();
   for (size_t j=0; j<local_mini_batch_size; ++j) {
     for (size_t i=0; i<input_size; ++i) {
       const auto& global_index = static_cast<size_t>(std::floor(local_input(i,j)));
@@ -213,6 +222,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
     }
   }
 
+  // Non-blocking barrier
+  // Note: SHMEM workspaces are ready to recieve gradients.
+  nb_barrier(comm, comm.get_trainer_comm(), m_nb_barrier_request);
+
 #endif // LBANN_HAS_SHMEM
 }
 
@@ -241,6 +254,11 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
   const size_t mini_batch_size = input.Width();
   const size_t local_mini_batch_size = local_output_grad.Width();
 
+  // Synchronize non-blocking barrier
+  // Note: Make sure SHMEM workspaces are ready to recieve gradients.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
+
   // Initialize SHMEM buffer for gradient w.r.t. embeddings
   LocalMat workspace(
     m_embedding_dim,
@@ -265,7 +283,11 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::bp_compute() {
         req.source_rank);
     }
   }
-  shmem_barrier_all(); /// @todo Smarter synchronization
+  shmem_quiet();
+
+  // Non-blocking barrier
+  // Note: Gradients have been sent.
+  nb_barrier(comm, comm.get_trainer_comm(), m_nb_barrier_request);
 
   // Use dense optimizer if needed
   if (!m_sparse_sgd) {
@@ -312,8 +334,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::apply_sparse_sgd_step(
   return;
 #else // LBANN_HAS_SHMEM
 
-  // SHMEM processing element
-  const size_t rank = this->get_comm()->get_rank_in_trainer();
+  // Synchronize non-blocking barrier
+  // Note: Make sure gradients have been received.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
 
   // Initialize SHMEM buffer for gradient w.r.t. embeddings
   LocalMat local_embeddings_grad(
@@ -323,6 +347,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::apply_sparse_sgd_step(
     m_embedding_dim);
 
   // Sparse SGD on local embeddings
+  const size_t rank = comm.get_rank_in_trainer();
   const size_t num_omp_threads = omp_get_num_threads();
   const size_t embeddings_per_thread
     = (local_embeddings.Width() + num_omp_threads - 1) / num_omp_threads;

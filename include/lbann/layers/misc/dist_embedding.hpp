@@ -91,7 +91,17 @@ protected:
 private:
 
   using LocalMat = El::Matrix<TensorDataType, Device>;
+  /// @todo Rename this something other than "request"
   using RequestType = dist_embedding_layer_impl::vector_request;
+
+  /** @brief Non-blocking barrier
+   *  @todo Handle case with non-default CUDA stream.
+   *  @todo Move to comm header.
+   */
+  static void nb_barrier(
+    lbann_comm& comm,
+    const El::mpi::Comm& c,
+    Al::request& req);
 
   void attach_embeddings_to_shmem_buffer();
   void apply_sparse_sgd_step(
@@ -131,6 +141,9 @@ private:
   RequestType* m_requests_buffer{nullptr};
   /** Allocated size of @c m_requests_buffer. */
   size_t m_requests_buffer_size{0};
+
+  /** Request to synchronize non-blocking barriers. */
+  Al::request m_nb_barrier_request;
 
 };
 
@@ -216,11 +229,16 @@ template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data(size_t max_mini_batch_size) {
   data_type_layer<TensorDataType>::setup_data(max_mini_batch_size);
 
+  // Synchronize non-blocking barrier
+  // Note: Make sure SHMEM buffers are safe to reset.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
+
   // Construct default weights if needed
   // Note: Randomly drawn from normal distribution with mean 0 and
   // standard deviation 1.
   if (!this->has_weights()) {
-    auto w = make_unique<data_type_weights<TensorDataType>>(this->get_comm());
+    auto w = make_unique<data_type_weights<TensorDataType>>(&comm);
     auto init = make_unique<normal_initializer<TensorDataType>>(0,1);
     auto opt = this->m_model->template create_optimizer<TensorDataType>();
     w->set_name(this->get_name() + "_weights");
@@ -257,7 +275,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data(size_t max_m
   // with no entries.
   if (m_sparse_sgd) {
     embeddings.set_optimizer(nullptr);
-    auto w = make_unique<data_type_weights<TensorDataType>>(this->get_comm());
+    auto w = make_unique<data_type_weights<TensorDataType>>(&comm);
     auto opt = make_unique<sgd<TensorDataType>>(0.);
     w->set_name(this->get_name() + "_dummy_weights");
     w->set_optimizer(std::move(opt));
@@ -271,6 +289,10 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data(size_t max_m
   // Setup embedding weights
   embeddings.setup();
   attach_embeddings_to_shmem_buffer();
+
+  // Non-blocking barrier
+  // Note: Embeddings have been initialized
+  nb_barrier(comm, comm.get_trainer_comm(), m_nb_barrier_request);
 
 }
 
@@ -286,7 +308,24 @@ bool dist_embedding_layer<TensorDataType,Layout,Device>::update_compute() {
     apply_sparse_sgd_step(input_size * mini_batch_size, local_embeddings);
   }
 
+  // Non-blocking barrier
+  // Note: Embeddings are up-to-date.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
+  nb_barrier(comm, comm.get_trainer_comm(), m_nb_barrier_request);
+
   return true;
+}
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+void dist_embedding_layer<TensorDataType,Layout,Device>::nb_barrier(
+  lbann_comm& comm,
+  const El::mpi::Comm& c,
+  Al::request& req) {
+  static El::Matrix<float,Device> buffer;
+  buffer.SetMemoryMode(0); // Don't use memory pool
+  buffer.Resize(1, 1);
+  comm.nb_allreduce(buffer, c, req);
 }
 
 // =============================================
