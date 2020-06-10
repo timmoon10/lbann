@@ -36,15 +36,26 @@ namespace lbann {
 
 namespace dist_embedding_layer_impl {
 
-  /** Request for an embedding vector from a remote process. */
-  struct vector_request {
+  /** Metadata for an embedding vector from a remote process. */
+  struct vector_metadata {
     size_t source_rank{0};
     size_t source_index{0};
     size_t target_rank{0};
     size_t target_index{0};
-    long is_completed{0};
     bool is_active{false};
   };
+
+  /**
+   *  @c dist_embedding_layer carefully uses non-blocking barriers to
+   *  ensure the correctness of asynchronous communication. However,
+   *  gradient checking changes the embedding values without
+   *  performing any synchronization. The quickest fix is to do a
+   *  blocking barrier at the beginning of forward prop to make sure
+   *  that all the embeddings are ready to be accessed.
+   *
+   *  @todo Think of a way to avoid this synchronization.
+   */
+  constexpr bool barrier_for_grad_check = false;
 
 } // namespace dist_embedding_layer_impl
 
@@ -87,10 +98,26 @@ protected:
 
   void fp_compute() override;
   void bp_compute() override;
+  bool update_compute() override;
 
 private:
 
-  using RequestType = dist_embedding_layer_impl::vector_request;
+  using LocalMat = El::Matrix<TensorDataType, Device>;
+  using MetadataType = dist_embedding_layer_impl::vector_metadata;
+
+  /** @brief Non-blocking barrier
+   *  @todo Handle case with non-default CUDA stream.
+   *  @todo Move to comm header.
+   */
+  static void nb_barrier(
+    lbann_comm& comm,
+    const El::mpi::Comm& c,
+    Al::request& req);
+
+  void attach_embeddings_to_shmem_buffer();
+  void apply_sparse_sgd_step(
+    size_t num_gradients,
+    LocalMat& local_embeddings);
 
   /** Size of dictionary of embeddings. */
   size_t m_num_embeddings;
@@ -105,15 +132,29 @@ private:
   /** SGD learning rate. */
   DataType m_learning_rate;
 
+  /** SHMEM buffer for embedding vectors.
+   *
+   *  If the embedding weights matrix is not already attached to a
+   *  SHMEM buffer, then this layer allocates a SHMEM buffer and
+   *  attaches it. In this case, the layer is responsible for managing
+   *  the buffer.
+   */
+  TensorDataType* m_embeddings_buffer{nullptr};
+  /** Allocated size of @c m_embeddings_buffer. */
+  size_t m_embeddings_buffer_size{0};
+
   /** SHMEM buffer to communicate embedding vectors. */
   TensorDataType* m_workspace_buffer{nullptr};
   /** Allocated size of @c m_workspace_buffer. */
   size_t m_workspace_buffer_size{0};
 
-  /** SHMEM buffer to communicate requests for embedding vectors. */
-  RequestType* m_requests_buffer{nullptr};
-  /** Allocated size of @c m_requests_buffer. */
-  size_t m_requests_buffer_size{0};
+  /** SHMEM buffer to communicate metadata for embedding vectors. */
+  MetadataType* m_metadata_buffer{nullptr};
+  /** Allocated size of @c m_metadata_buffer. */
+  size_t m_metadata_buffer_size{0};
+
+  /** Request to synchronize non-blocking barriers. */
+  Al::request m_nb_barrier_request;
 
 };
 
@@ -199,11 +240,16 @@ template <typename TensorDataType, data_layout Layout, El::Device Device>
 void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data(size_t max_mini_batch_size) {
   data_type_layer<TensorDataType>::setup_data(max_mini_batch_size);
 
+  // Synchronize non-blocking barrier
+  // Note: Make sure SHMEM buffers are safe to reset.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
+
   // Construct default weights if needed
   // Note: Randomly drawn from normal distribution with mean 0 and
   // standard deviation 1.
   if (!this->has_weights()) {
-    auto w = make_unique<data_type_weights<TensorDataType>>(this->get_comm());
+    auto w = make_unique<data_type_weights<TensorDataType>>(&comm);
     auto init = make_unique<normal_initializer<TensorDataType>>(0,1);
     auto opt = this->m_model->template create_optimizer<TensorDataType>();
     w->set_name(this->get_name() + "_weights");
@@ -240,7 +286,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data(size_t max_m
   // with no entries.
   if (m_sparse_sgd) {
     embeddings.set_optimizer(nullptr);
-    auto w = make_unique<data_type_weights<TensorDataType>>(this->get_comm());
+    auto w = make_unique<data_type_weights<TensorDataType>>(&comm);
     auto opt = make_unique<sgd<TensorDataType>>(0.);
     w->set_name(this->get_name() + "_dummy_weights");
     w->set_optimizer(std::move(opt));
@@ -253,7 +299,44 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::setup_data(size_t max_m
 
   // Setup embedding weights
   embeddings.setup();
+  attach_embeddings_to_shmem_buffer();
 
+  // Non-blocking barrier
+  // Note: Embeddings have been initialized
+  nb_barrier(comm, comm.get_trainer_comm(), m_nb_barrier_request);
+
+}
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+bool dist_embedding_layer<TensorDataType,Layout,Device>::update_compute() {
+
+  // Apply sparse SGD if needed
+  if (m_sparse_sgd) {
+    const size_t input_size = this->get_input_size();
+    const size_t mini_batch_size = this->get_prev_activations().Width();
+    auto& embeddings = this->get_data_type_weights(0).get_values();
+    auto& local_embeddings = dynamic_cast<LocalMat&>(embeddings.Matrix());
+    apply_sparse_sgd_step(input_size * mini_batch_size, local_embeddings);
+  }
+
+  // Non-blocking barrier
+  // Note: Embeddings are up-to-date.
+  auto& comm = *this->get_comm();
+  comm.wait(m_nb_barrier_request);
+  nb_barrier(comm, comm.get_trainer_comm(), m_nb_barrier_request);
+
+  return true;
+}
+
+template <typename TensorDataType, data_layout Layout, El::Device Device>
+void dist_embedding_layer<TensorDataType,Layout,Device>::nb_barrier(
+  lbann_comm& comm,
+  const El::mpi::Comm& c,
+  Al::request& req) {
+  static El::Matrix<float,Device> buffer;
+  buffer.SetMemoryMode(0); // Don't use memory pool
+  buffer.Resize(1, 1);
+  comm.nb_allreduce(buffer, c, req);
 }
 
 // =============================================
