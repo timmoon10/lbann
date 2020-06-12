@@ -19,7 +19,7 @@ import utils.snap
 graph_name = 'blog'
 graph_file = os.path.join(
     root_dir, 'largescale_node2vec', 'evaluation', 'dataset',
-    'blog', 'edges_0based'
+    'youtube', 'edges_0based'
 )
 # graph_file = os.path.join(root_dir, 'data', 'graphs', graph_name, 'graph.txt')
 directed = False
