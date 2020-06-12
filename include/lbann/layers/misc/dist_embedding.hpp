@@ -45,18 +45,6 @@ namespace dist_embedding_layer_impl {
     bool is_active{false};
   };
 
-  /**
-   *  @c dist_embedding_layer carefully uses non-blocking barriers to
-   *  ensure the correctness of asynchronous communication. However,
-   *  gradient checking changes the embedding values without
-   *  performing any synchronization. The quickest fix is to do a
-   *  blocking barrier at the beginning of forward prop to make sure
-   *  that all the embeddings are ready to be accessed.
-   *
-   *  @todo Think of a way to avoid this synchronization.
-   */
-  constexpr bool barrier_for_grad_check = false;
-
 } // namespace dist_embedding_layer_impl
 
 /** @brief Embedding layer with distributed weights.
@@ -78,7 +66,8 @@ public:
     size_t num_embeddings,
     size_t embedding_dim,
     bool sparse_sgd,
-    DataType learning_rate);
+    DataType learning_rate,
+    bool barrier_in_forward_prop);
 
   dist_embedding_layer(const dist_embedding_layer& other);
   dist_embedding_layer& operator=(const dist_embedding_layer& other);
@@ -132,6 +121,19 @@ private:
   /** SGD learning rate. */
   DataType m_learning_rate;
 
+  /** Perform a blocking barrier at the beginning of forward prop.
+   *
+   *  This layer performs synchronization with non-blocking barriers
+   *  to ensure the correctness of asynchronous communication.
+   *  However, gradient checking changes the embedding values without
+   *  performing any synchronization. The quickest fix is to do a
+   *  blocking barrier at the beginning of forward prop to make sure
+   *  that all the embeddings are ready to be accessed.
+   *
+   *  @todo Think of a way to avoid this synchronization.
+   */
+  bool m_barrier_in_forward_prop;
+
   /** SHMEM buffer for embedding vectors.
    *
    *  If the embedding weights matrix is not already attached to a
@@ -153,7 +155,17 @@ private:
   /** Allocated size of @c m_metadata_buffer. */
   size_t m_metadata_buffer_size{0};
 
-  /** Request to synchronize non-blocking barriers. */
+  /** Request to synchronize non-blocking barriers.
+   *
+   *  Careful synchronization is required to ensure the correctness of
+   *  asynchronous, one-sided communication via SHMEM buffers. After
+   *  any modification to a SHMEM buffer (local or remote), a
+   *  non-blocking barrier is launched to signal that the local
+   *  process has finished its work. Before the next access to the
+   *  SHMEM buffer, the non-blocking barrier is synchronized to make
+   *  sure that all remote processes have finished their work and that
+   *  the buffers are safe to access.
+   */
   Al::request m_nb_barrier_request;
 
 };
@@ -171,12 +183,14 @@ dist_embedding_layer<TensorDataType,Layout,Device>::dist_embedding_layer(
   size_t num_embeddings,
   size_t embedding_dim,
   bool sparse_sgd,
-  DataType learning_rate)
+  DataType learning_rate,
+  bool barrier_in_forward_prop)
   : data_type_layer<TensorDataType>(comm),
     m_num_embeddings{num_embeddings},
     m_embedding_dim{embedding_dim},
     m_sparse_sgd{sparse_sgd},
-    m_learning_rate{learning_rate} {
+    m_learning_rate{learning_rate},
+    m_barrier_in_forward_prop{barrier_in_forward_prop} {
 
   // Learning rate is only used for sparse SGD
   if (!m_sparse_sgd) {

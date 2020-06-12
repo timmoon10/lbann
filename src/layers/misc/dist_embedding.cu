@@ -355,7 +355,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
 
   // Barrier to handle gradient checking
   /// @todo Think of a way to avoid this synchronization
-  if (dist_embedding_layer_impl::barrier_for_grad_check) {
+  if (m_barrier_in_forward_prop) {
     nvshmemx_barrier_all_on_stream(stream);
   }
 

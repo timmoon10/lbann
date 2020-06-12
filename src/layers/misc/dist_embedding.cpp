@@ -145,7 +145,7 @@ void dist_embedding_layer<TensorDataType,Layout,Device>::fp_compute() {
 
   // Barrier to handle gradient checking
   /// @todo Think of a way to avoid this synchronization
-  if (dist_embedding_layer_impl::barrier_for_grad_check) {
+  if (m_barrier_in_forward_prop) {
     shmem_barrier_all();
   }
 
@@ -426,7 +426,8 @@ std::unique_ptr<Layer> build_dist_embedding_layer_from_pbuf(
     params.num_embeddings(),
     params.embedding_dim(),
     params.sparse_sgd(),
-    params.learning_rate());
+    params.learning_rate(),
+    params.barrier_in_forward_prop());
 }
 
 // =============================================
